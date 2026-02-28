@@ -62,6 +62,7 @@
 - [快速开始](#快速开始)
 - [API Key](#api-key)
 - [本地模型](#本地模型)
+- [Fork-specific changes (vs upstream)](#fork-specific-changes-vs-upstream)
 - [文档](#文档)
 - [从源码安装](#从源码安装)
 - [为什么叫 CoPaw？](#为什么叫-copaw)
@@ -200,6 +201,22 @@ docker run -p 8088:8088 -v copaw-data:/app/working agentscope/copaw:latest
 其他工具所需密钥（如网页搜索的 `TAVILY_API_KEY`）可在控制台 **设置 → 环境变量** 中配置，详见 [配置](https://copaw.agentscope.io/docs/config)。
 
 > **仅用本地模型？** 若使用 [本地模型](#本地模型)（llama.cpp 或 MLX），则**无需**任何 API Key。
+
+---
+
+## Fork-specific changes (vs upstream)
+
+本 fork 以 upstream CoPaw 的行为为基线，并在尽量保持兼容的前提下扩展了多模态能力。
+
+- **媒体预处理能力扩展**：预处理不再仅支持图片，现已支持 **image / audio / video**，且每种能力可独立配置。
+- **VLM fallback 全链路可配置**：fallback 链可在 **WebUI / CLI / API** 三个入口统一管理。
+- **新增分项配置接口**：后端 API 支持分别更新 `vision.image`、`vision.audio`、`vision.video`（控制台模型页已接入）。
+- **CLI 能力增强**：新增多模态设置命令：
+  - `copaw models set-vision-audio`
+  - `copaw models set-vision-video`
+  - `copaw models list` 现会展示完整 vision/media prepass 配置。
+- **能力路由泛化**：模型能力检测与预处理路由从 vision-only 扩展为通用输入能力（`image`、`audio`、`video`）。
+- **兼容性保留**：已有单视觉相关环境变量与默认行为继续可用，便于从 upstream 平滑迁移。
 
 ---
 

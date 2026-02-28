@@ -62,6 +62,7 @@ Your Personal AI Assistant; easy to install, deploy on your own machine or on th
 - [Quick Start](#quick-start)
 - [API Key](#api-key)
 - [Local Models](#local-models)
+- [Fork-specific changes](#fork-specific-changes-vs-upstream)
 - [Documentation](#documentation)
 - [Install from source](#install-from-source)
 - [Why CoPaw?](#why-copaw)
@@ -233,6 +234,20 @@ If you add custom models, you can mark them as vision-capable:
 ```bash
 copaw models add-model <provider_id> -m <model_id> -n <display_name> --vision
 ```
+
+## Fork-specific changes (vs upstream)
+
+This fork keeps upstream CoPaw behavior as the baseline, and extends multimodal handling in a backward-compatible way.
+
+- **Media prepass expanded**: prepass is no longer image-only; it now supports **image / audio / video** inputs with per-capability settings.
+- **VLM fallback chain in all surfaces**: fallback list is configurable from **WebUI**, **CLI**, and **API** instead of being limited to one workflow.
+- **New vision settings endpoints**: API supports separate updates for `vision.image`, `vision.audio`, and `vision.video` (used by the Console models page).
+- **CLI additions**: new commands for multimodal settings:
+  - `copaw models set-vision-audio`
+  - `copaw models set-vision-video`
+  - `copaw models list` now shows all vision/media prepass settings.
+- **Capability routing generalized**: model capability detection and prepass routing were refactored from vision-only checks to generic input capability checks (`image`, `audio`, `video`).
+- **Compatibility preserved**: existing single-vision env overrides and behavior remain supported for users migrating from upstream defaults.
 
 ## Local Models
 
