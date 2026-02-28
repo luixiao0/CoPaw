@@ -15,6 +15,10 @@ from ...providers import (
     ProviderDefinition,
     ProviderInfo,
     ProvidersData,
+    VisionAudioSettings,
+    VisionImageSettings,
+    VisionVideoSettings,
+    update_vision_audio_settings,
     add_model,
     create_custom_provider,
     delete_custom_provider,
@@ -27,6 +31,8 @@ from ...providers import (
     set_active_vlm,
     set_active_vlm_fallbacks,
     update_provider_settings,
+    update_vision_video_settings,
+    update_vision_image_settings,
 )
 
 router = APIRouter(prefix="/models", tags=["models"])
@@ -46,6 +52,33 @@ class VlmFallbacksRequest(BaseModel):
     fallbacks: List[ModelSlotRequest] = Field(default_factory=list)
 
 
+class VisionImageSettingsRequest(BaseModel):
+    enabled: Optional[bool] = Field(default=None)
+    attachments_mode: Optional[str] = Field(default=None)
+    max_images: Optional[int] = Field(default=None, ge=1, le=16)
+    prompt_override: Optional[str] = Field(default=None)
+    timeout_seconds: Optional[int] = Field(default=None, ge=5, le=600)
+    max_output_chars: Optional[int] = Field(default=None, ge=200, le=20000)
+
+
+class VisionAudioSettingsRequest(BaseModel):
+    enabled: Optional[bool] = Field(default=None)
+    attachments_mode: Optional[str] = Field(default=None)
+    max_items: Optional[int] = Field(default=None, ge=1, le=8)
+    prompt_override: Optional[str] = Field(default=None)
+    timeout_seconds: Optional[int] = Field(default=None, ge=5, le=600)
+    max_output_chars: Optional[int] = Field(default=None, ge=200, le=30000)
+
+
+class VisionVideoSettingsRequest(BaseModel):
+    enabled: Optional[bool] = Field(default=None)
+    attachments_mode: Optional[str] = Field(default=None)
+    max_items: Optional[int] = Field(default=None, ge=1, le=4)
+    prompt_override: Optional[str] = Field(default=None)
+    timeout_seconds: Optional[int] = Field(default=None, ge=5, le=600)
+    max_output_chars: Optional[int] = Field(default=None, ge=200, le=30000)
+
+
 class CreateCustomProviderRequest(BaseModel):
     id: str = Field(...)
     name: str = Field(...)
@@ -58,6 +91,7 @@ class CreateCustomProviderRequest(BaseModel):
 class AddModelRequest(BaseModel):
     id: str = Field(...)
     name: str = Field(...)
+    input_capabilities: List[str] = Field(default_factory=list)
 
 
 def _build_provider_info(
@@ -186,7 +220,14 @@ async def add_model_endpoint(
     body: AddModelRequest = Body(...),
 ) -> ProviderInfo:
     try:
-        data = add_model(provider_id, ModelInfo(id=body.id, name=body.name))
+        data = add_model(
+            provider_id,
+            ModelInfo(
+                id=body.id,
+                name=body.name,
+                input_capabilities=body.input_capabilities,
+            ),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     provider = get_provider(provider_id)
@@ -223,6 +264,7 @@ async def get_active_models() -> ActiveModelsInfo:
         active_llm=data.active_llm,
         active_vlm=data.active_vlm,
         active_vlm_fallbacks=data.active_vlm_fallbacks,
+        vision=data.vision,
     )
 
 
@@ -263,6 +305,7 @@ async def set_active_model(
         active_llm=data.active_llm,
         active_vlm=data.active_vlm,
         active_vlm_fallbacks=data.active_vlm_fallbacks,
+        vision=data.vision,
     )
 
 
@@ -303,6 +346,7 @@ async def set_active_vlm_model(
         active_llm=data.active_llm,
         active_vlm=data.active_vlm,
         active_vlm_fallbacks=data.active_vlm_fallbacks,
+        vision=data.vision,
     )
 
 
@@ -342,4 +386,62 @@ async def set_active_vlm_model_fallbacks(
         active_llm=data.active_llm,
         active_vlm=data.active_vlm,
         active_vlm_fallbacks=data.active_vlm_fallbacks,
+        vision=data.vision,
     )
+
+
+@router.put(
+    "/vision/image",
+    response_model=VisionImageSettings,
+    summary="Update image prepass settings",
+)
+async def set_vision_image_settings(
+    body: VisionImageSettingsRequest = Body(...),
+) -> VisionImageSettings:
+    data = update_vision_image_settings(
+        enabled=body.enabled,
+        attachments_mode=body.attachments_mode,
+        max_images=body.max_images,
+        prompt_override=body.prompt_override,
+        timeout_seconds=body.timeout_seconds,
+        max_output_chars=body.max_output_chars,
+    )
+    return data.vision.image
+
+
+@router.put(
+    "/vision/audio",
+    response_model=VisionAudioSettings,
+    summary="Update audio prepass settings",
+)
+async def set_vision_audio_settings(
+    body: VisionAudioSettingsRequest = Body(...),
+) -> VisionAudioSettings:
+    data = update_vision_audio_settings(
+        enabled=body.enabled,
+        attachments_mode=body.attachments_mode,
+        max_items=body.max_items,
+        prompt_override=body.prompt_override,
+        timeout_seconds=body.timeout_seconds,
+        max_output_chars=body.max_output_chars,
+    )
+    return data.vision.audio
+
+
+@router.put(
+    "/vision/video",
+    response_model=VisionVideoSettings,
+    summary="Update video prepass settings",
+)
+async def set_vision_video_settings(
+    body: VisionVideoSettingsRequest = Body(...),
+) -> VisionVideoSettings:
+    data = update_vision_video_settings(
+        enabled=body.enabled,
+        attachments_mode=body.attachments_mode,
+        max_items=body.max_items,
+        prompt_override=body.prompt_override,
+        timeout_seconds=body.timeout_seconds,
+        max_output_chars=body.max_output_chars,
+    )
+    return data.vision.video

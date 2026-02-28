@@ -11,6 +11,10 @@ from .models import (
     ProviderSettings,
     ProvidersData,
     ResolvedModelConfig,
+    VisionAudioSettings,
+    VisionImageSettings,
+    VisionSettings,
+    VisionVideoSettings,
 )
 from .registry import (
     PROVIDERS,
@@ -28,6 +32,9 @@ from .store import (
     get_active_llm_config,
     get_active_vlm_config,
     get_active_vlm_fallback_configs,
+    get_vision_audio_settings,
+    get_vision_image_settings,
+    get_vision_video_settings,
     load_providers_json,
     mask_api_key,
     remove_model,
@@ -35,7 +42,10 @@ from .store import (
     set_active_llm,
     set_active_vlm,
     set_active_vlm_fallbacks,
+    update_vision_audio_settings,
     update_provider_settings,
+    update_vision_video_settings,
+    update_vision_image_settings,
 )
 
 __all__ = [
@@ -48,6 +58,10 @@ __all__ = [
     "ProviderSettings",
     "ProvidersData",
     "ResolvedModelConfig",
+    "VisionAudioSettings",
+    "VisionImageSettings",
+    "VisionSettings",
+    "VisionVideoSettings",
     "PROVIDERS",
     "get_chat_model_class",
     "get_provider",
@@ -61,6 +75,9 @@ __all__ = [
     "get_active_llm_config",
     "get_active_vlm_config",
     "get_active_vlm_fallback_configs",
+    "get_vision_audio_settings",
+    "get_vision_image_settings",
+    "get_vision_video_settings",
     "load_providers_json",
     "mask_api_key",
     "remove_model",
@@ -68,5 +85,8 @@ __all__ = [
     "set_active_llm",
     "set_active_vlm",
     "set_active_vlm_fallbacks",
+    "update_vision_audio_settings",
     "update_provider_settings",
+    "update_vision_video_settings",
+    "update_vision_image_settings",
 ]

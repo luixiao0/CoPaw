@@ -22,6 +22,9 @@ from ..providers import (
     set_active_vlm,
     set_active_vlm_fallbacks,
     update_provider_settings,
+    update_vision_audio_settings,
+    update_vision_image_settings,
+    update_vision_video_settings,
 )
 from .utils import prompt_choice
 
@@ -466,8 +469,10 @@ def list_cmd() -> None:
             if all_models:
                 click.echo(f"  {'models':16s}:")
                 for m in all_models:
+                    caps = {c.lower() for c in m.input_capabilities}
+                    cap_label = " [vision]" if "image" in caps else ""
                     label = " [user-added]" if m in extra else ""
-                    click.echo(f"    - {m.name} ({m.id}){label}")
+                    click.echo(f"    - {m.name} ({m.id}){label}{cap_label}")
 
     click.echo(f"\n{'═' * 44}")
     click.echo("  Active Model Slots")
@@ -487,6 +492,24 @@ def list_cmd() -> None:
         click.echo(f"  {'VLM fallback':16s}:")
         for slot in data.active_vlm_fallbacks:
             click.echo(f"    - {slot.provider_id} / {slot.model}")
+    image = data.vision.image
+    click.echo(f"  {'Vision image':16s}: {'enabled' if image.enabled else 'disabled'}")
+    click.echo(
+        f"  {'Vision policy':16s}: {image.attachments_mode} "
+        f"(max_images={image.max_images})",
+    )
+    audio = data.vision.audio
+    click.echo(f"  {'Vision audio':16s}: {'enabled' if audio.enabled else 'disabled'}")
+    click.echo(
+        f"  {'Audio policy':16s}: {audio.attachments_mode} "
+        f"(max_items={audio.max_items})",
+    )
+    video = data.vision.video
+    click.echo(f"  {'Vision video':16s}: {'enabled' if video.enabled else 'disabled'}")
+    click.echo(
+        f"  {'Video policy':16s}: {video.attachments_mode} "
+        f"(max_items={video.max_items})",
+    )
     click.echo()
 
 
@@ -522,6 +545,130 @@ def set_vlm_cmd() -> None:
 def set_vlm_fallbacks_cmd() -> None:
     """Interactively set active VLM fallback models."""
     configure_vlm_fallbacks_interactive()
+
+
+@models_group.command("set-vision-image")
+@click.option("--enabled/--disabled", default=None, help="Enable or disable image prepass.")
+@click.option(
+    "--mode",
+    "attachments_mode",
+    type=click.Choice(["first", "all"]),
+    default=None,
+    help="Image selection mode for prepass.",
+)
+@click.option("--max-images", type=int, default=None, help="Max images in all mode.")
+@click.option("--timeout-seconds", type=int, default=None, help="Timeout per prepass attempt.")
+@click.option(
+    "--max-output-chars",
+    type=int,
+    default=None,
+    help="Max prepass output characters injected to LLM.",
+)
+@click.option(
+    "--prompt-override",
+    type=str,
+    default=None,
+    help="Optional custom prepass prompt override.",
+)
+def set_vision_image_cmd(
+    enabled: bool | None,
+    attachments_mode: str | None,
+    max_images: int | None,
+    timeout_seconds: int | None,
+    max_output_chars: int | None,
+    prompt_override: str | None,
+) -> None:
+    """Set image prepass strategy settings."""
+    data = update_vision_image_settings(
+        enabled=enabled,
+        attachments_mode=attachments_mode,
+        max_images=max_images,
+        timeout_seconds=timeout_seconds,
+        max_output_chars=max_output_chars,
+        prompt_override=prompt_override,
+    )
+    image = data.vision.image
+    click.echo(
+        "✓ Vision image settings updated: "
+        f"enabled={image.enabled}, mode={image.attachments_mode}, "
+        f"max_images={image.max_images}, timeout={image.timeout_seconds}s",
+    )
+
+
+@models_group.command("set-vision-audio")
+@click.option("--enabled/--disabled", default=None, help="Enable or disable audio prepass.")
+@click.option(
+    "--mode",
+    "attachments_mode",
+    type=click.Choice(["first", "all"]),
+    default=None,
+    help="Audio selection mode for prepass.",
+)
+@click.option("--max-items", type=int, default=None, help="Max audio blocks in all mode.")
+@click.option("--timeout-seconds", type=int, default=None, help="Timeout per prepass attempt.")
+@click.option("--max-output-chars", type=int, default=None, help="Max output chars injected.")
+@click.option("--prompt-override", type=str, default=None, help="Optional prompt override.")
+def set_vision_audio_cmd(
+    enabled: bool | None,
+    attachments_mode: str | None,
+    max_items: int | None,
+    timeout_seconds: int | None,
+    max_output_chars: int | None,
+    prompt_override: str | None,
+) -> None:
+    """Set audio prepass strategy settings."""
+    data = update_vision_audio_settings(
+        enabled=enabled,
+        attachments_mode=attachments_mode,
+        max_items=max_items,
+        timeout_seconds=timeout_seconds,
+        max_output_chars=max_output_chars,
+        prompt_override=prompt_override,
+    )
+    audio = data.vision.audio
+    click.echo(
+        "✓ Vision audio settings updated: "
+        f"enabled={audio.enabled}, mode={audio.attachments_mode}, "
+        f"max_items={audio.max_items}, timeout={audio.timeout_seconds}s",
+    )
+
+
+@models_group.command("set-vision-video")
+@click.option("--enabled/--disabled", default=None, help="Enable or disable video prepass.")
+@click.option(
+    "--mode",
+    "attachments_mode",
+    type=click.Choice(["first", "all"]),
+    default=None,
+    help="Video selection mode for prepass.",
+)
+@click.option("--max-items", type=int, default=None, help="Max video blocks in all mode.")
+@click.option("--timeout-seconds", type=int, default=None, help="Timeout per prepass attempt.")
+@click.option("--max-output-chars", type=int, default=None, help="Max output chars injected.")
+@click.option("--prompt-override", type=str, default=None, help="Optional prompt override.")
+def set_vision_video_cmd(
+    enabled: bool | None,
+    attachments_mode: str | None,
+    max_items: int | None,
+    timeout_seconds: int | None,
+    max_output_chars: int | None,
+    prompt_override: str | None,
+) -> None:
+    """Set video prepass strategy settings."""
+    data = update_vision_video_settings(
+        enabled=enabled,
+        attachments_mode=attachments_mode,
+        max_items=max_items,
+        timeout_seconds=timeout_seconds,
+        max_output_chars=max_output_chars,
+        prompt_override=prompt_override,
+    )
+    video = data.vision.video
+    click.echo(
+        "✓ Vision video settings updated: "
+        f"enabled={video.enabled}, mode={video.attachments_mode}, "
+        f"max_items={video.max_items}, timeout={video.timeout_seconds}s",
+    )
 
 
 @models_group.command("add-provider")
@@ -586,7 +733,17 @@ def remove_provider_cmd(provider_id: str, yes: bool) -> None:
 @click.argument("provider_id")
 @click.option("--model-id", "-m", required=True, help="Model identifier")
 @click.option("--model-name", "-n", required=True, help="Model display name")
-def add_model_cmd(provider_id: str, model_id: str, model_name: str) -> None:
+@click.option(
+    "--vision/--no-vision",
+    default=False,
+    help="Mark model as image-capable for routing decisions.",
+)
+def add_model_cmd(
+    provider_id: str,
+    model_id: str,
+    model_name: str,
+    vision: bool,
+) -> None:
     """Add a model to any provider (built-in or custom)."""
     # Prevent manual model addition for Ollama
     if provider_id == "ollama":
@@ -600,7 +757,15 @@ def add_model_cmd(provider_id: str, model_id: str, model_name: str) -> None:
         raise SystemExit(1)
 
     try:
-        add_model(provider_id, ModelInfo(id=model_id, name=model_name))
+        caps = ["image"] if vision else []
+        add_model(
+            provider_id,
+            ModelInfo(
+                id=model_id,
+                name=model_name,
+                input_capabilities=caps,
+            ),
+        )
     except ValueError as exc:
         click.echo(click.style(f"Error: {exc}", fg="red"))
         raise SystemExit(1) from exc

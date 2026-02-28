@@ -6,6 +6,7 @@ with integrated tools, skills, and memory management.
 """
 import logging
 import os
+import asyncio
 from typing import Any, List, Optional, Type
 
 from agentscope.agent import ReActAgent
@@ -16,13 +17,16 @@ from pydantic import BaseModel
 from .command_handler import CommandHandler
 from .hooks import BootstrapHook, MemoryCompactionHook
 from .memory import CoPawInMemoryMemory
-from .model_capabilities import supports_vision
+from .model_capabilities import supports_input_capability
 from .model_factory import (
     create_model_and_formatter,
     create_model_from_config,
     create_text_and_vlm_models,
 )
-from .model_fallback import run_with_vlm_fallback
+from .image_understanding import (
+    get_last_message,
+    run_media_understanding_prepass,
+)
 from .prompt import build_system_prompt_from_working_dir
 from .skills_manager import (
     ensure_skills_initialized,
@@ -52,6 +56,7 @@ from ..providers import (
     get_active_llm_config,
     get_active_vlm_config,
     get_active_vlm_fallback_configs,
+    load_providers_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +118,7 @@ class CoPawAgent(ReActAgent):
         self._active_llm_cfg = get_active_llm_config()
         self._active_vlm_cfg = get_active_vlm_config()
         self._active_vlm_fallback_cfgs = get_active_vlm_fallback_configs()
+        self._vision_settings = load_providers_json().vision
 
         if self._active_llm_cfg is not None:
             model, self._vlm_model, formatter = create_text_and_vlm_models(
@@ -321,134 +327,153 @@ class CoPawAgent(ReActAgent):
             await self.print(msg)
             return msg
 
-        # Capability-aware routing: image input goes to VLM only when primary
-        # LLM does not support vision. VLM output is treated as auxiliary
-        # context and then handed back to LLM for final task completion.
-        if self._should_route_to_vlm(msg):
-            try:
-                analysis = await self._run_vlm_prepass(msg)
-                msg = self._inject_vlm_analysis_for_llm(msg, analysis)
-            except Exception as e:
-                logger.warning("VLM prepass failed; continue with degraded context: %s", e)
-                msg = self._inject_vlm_failure_for_llm(msg, str(e))
+        # Capability-aware routing: media input goes to prepass only when
+        # primary LLM lacks required modalities.
+        capabilities = self._message_media_capabilities(msg)
+        if capabilities and self._should_route_to_vlm(msg, capabilities):
+            analyses: list[str] = []
+            failures: list[str] = []
+            for capability in ("image", "audio", "video"):
+                if capability not in capabilities:
+                    continue
+                result = await self._run_media_understanding(msg, capability)
+                if result.decision.outcome == "success" and result.analysis:
+                    logger.info(
+                        "%s prepass completed with %s/%s (%d item(s), %d attempt(s))",
+                        capability,
+                        result.used.provider_id if result.used else "unknown",
+                        result.used.model if result.used else "unknown",
+                        result.decision.selected_item_count,
+                        len(result.decision.attempts),
+                    )
+                    analyses.append(f"[{capability}] {result.analysis}")
+                else:
+                    reason = result.decision.reason or result.decision.outcome
+                    logger.warning(
+                        "%s prepass unavailable (%s); continue with degraded context",
+                        capability,
+                        reason,
+                    )
+                    failures.append(f"{capability}: {reason}")
+
+            if analyses:
+                msg = self._inject_vlm_analysis_for_llm(msg, "\n".join(analyses))
+            if failures:
+                msg = self._inject_vlm_failure_for_llm(msg, "; ".join(failures))
 
         # Normal message processing (or no VLM configured)
         return await super().reply(msg=msg, structured_model=structured_model)
 
-    def _should_route_to_vlm(self, msg: Msg | list[Msg] | None) -> bool:
-        if not self._message_has_image_blocks(msg):
+    def _should_route_to_vlm(
+        self,
+        msg: Msg | list[Msg] | None,
+        capabilities: set[str] | None = None,
+    ) -> bool:
+        caps = capabilities or self._message_media_capabilities(msg)
+        if not caps:
+            logger.debug("Media routing skipped: no media blocks")
             return False
-        if self._active_llm_cfg is not None and supports_vision(
-            self._active_llm_cfg,
+        if self._active_llm_cfg is not None and all(
+            supports_input_capability(self._active_llm_cfg, cap) for cap in caps
         ):
+            logger.debug(
+                "Media routing skipped: active LLM supports requested capabilities (%s/%s)",
+                self._active_llm_cfg.provider_id,
+                self._active_llm_cfg.model,
+            )
             return False
         if self._vlm_model is not None:
+            logger.debug("Vision routing enabled: using active VLM model")
             return True
-        return len(self._vlm_fallback_models) > 0
+        use_fallback = len(self._vlm_fallback_models) > 0
+        if use_fallback:
+            logger.debug("Vision routing enabled: using VLM fallback chain only")
+        else:
+            logger.debug("Vision routing skipped: no VLM configured")
+        return use_fallback
 
     @staticmethod
-    def _message_has_image_blocks(msg: Msg | list[Msg] | None) -> bool:
+    def _message_media_capabilities(msg: Msg | list[Msg] | None) -> set[str]:
         messages = (
             [msg] if isinstance(msg, Msg) else msg if isinstance(msg, list) else []
         )
+        capabilities: set[str] = set()
         for message in messages:
             if not isinstance(message, Msg):
                 continue
             if not isinstance(message.content, list):
                 continue
             for block in message.content:
-                if isinstance(block, dict) and block.get("type") == "image":
-                    return True
-        return False
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type in {"image", "audio", "video"}:
+                    capabilities.add(block_type)
+        return capabilities
 
-    async def _run_vlm_prepass(self, msg: Msg | list[Msg] | None) -> str:
-        """Run a vision-only prepass and return text analysis."""
-        if self._active_vlm_cfg is None and len(self._vlm_fallback_models) == 0:
-            raise RuntimeError("No VLM configured for image analysis")
+    async def _run_media_understanding(
+        self,
+        msg: Msg | list[Msg] | None,
+        capability: str,
+    ):
+        settings = getattr(self._vision_settings, capability)
+        env_mode = os.getenv(
+            f"COPAW_{capability.upper()}_ATTACHMENTS_MODE",
+            "",
+        ).strip().lower()
+        attachments_mode = env_mode if env_mode in {"first", "all"} else settings.attachments_mode
+        env_max_raw = os.getenv(f"COPAW_{capability.upper()}_MAX_ITEMS", "").strip()
+        try:
+            default_max = getattr(settings, "max_images", None) or settings.max_items
+            max_items = max(1, int(env_max_raw)) if env_max_raw else default_max
+        except ValueError:
+            max_items = getattr(settings, "max_images", None) or settings.max_items
 
-        vlm_msg = self._build_vlm_prepass_message(msg)
+        return await run_media_understanding_prepass(
+            msg=msg,
+            capability=capability,
+            enabled=settings.enabled,
+            attachments_mode=attachments_mode,
+            max_items=max_items,
+            prompt_override=settings.prompt_override,
+            timeout_seconds=settings.timeout_seconds,
+            max_output_chars=settings.max_output_chars,
+            active_vlm_cfg=self._active_vlm_cfg,
+            vlm_fallback_models=self._vlm_fallback_models,
+            active_vlm_model=self._vlm_model,
+            run_with_runtime_model=self._run_runtime_prepass,
+        )
 
-        model_map = {}
-        if self._active_vlm_cfg is not None and self._vlm_model is not None:
-            key = (self._active_vlm_cfg.provider_id, self._active_vlm_cfg.model)
-            model_map[key] = self._vlm_model
-        for cfg, model in self._vlm_fallback_models:
-            key = (cfg.provider_id, cfg.model)
-            model_map[key] = model
-
-        fallbacks = [cfg for cfg, _ in self._vlm_fallback_models]
-        if self._active_vlm_cfg is None:
-            primary = fallbacks[0]
-            fallbacks = fallbacks[1:]
-        else:
-            primary = self._active_vlm_cfg
-
-        async def _run(cfg):
-            key = (cfg.provider_id, cfg.model)
-            runtime_model = model_map[key]
-            prepass_reply = await self._reply_with_runtime_model(
+    async def _run_runtime_prepass(
+        self,
+        runtime_model,
+        msg: Msg,
+        timeout_seconds: int,
+    ) -> str:
+        prepass_reply = await asyncio.wait_for(
+            self._reply_with_runtime_model(
                 runtime_model,
-                msg=vlm_msg,
+                msg=msg,
                 structured_model=None,
                 persist_to_memory=False,
-            )
-            analysis = prepass_reply.get_text_content()
-            if not analysis:
-                raise RuntimeError("VLM prepass returned empty analysis")
-            return analysis
-
-        result = await run_with_vlm_fallback(primary, fallbacks, _run)
-        logger.info(
-            "VLM prepass completed with %s/%s",
-            result.used.provider_id,
-            result.used.model,
+            ),
+            timeout=max(1, timeout_seconds),
         )
-        return result.result
-
-    def _build_vlm_prepass_message(self, msg: Msg | list[Msg] | None) -> Msg:
-        source = self._get_last_message(msg)
-        blocks = source.content if isinstance(source.content, list) else []
-        image_blocks = [
-            block
-            for block in blocks
-            if isinstance(block, dict) and block.get("type") == "image"
-        ]
-        user_text = source.get_text_content() or ""
-        prompt = (
-            "You are a vision preprocessor for a stronger text-only planner.\n"
-            "Analyze the provided images and return structured notes only.\n"
-            "Do NOT answer the user directly and do NOT invent unseen details.\n\n"
-            "Required output sections:\n"
-            "1) OCR text\n"
-            "2) Key objects/entities\n"
-            "3) Spatial/layout cues relevant to task\n"
-            "4) Confidence and ambiguities\n"
-            "5) Suggested follow-up checks for the planner\n\n"
-            f"User task:\n{user_text}"
-        )
-        content = [TextBlock(type="text", text=prompt), *image_blocks]
-        return Msg(name=source.name, role="user", content=content)
+        analysis = prepass_reply.get_text_content()
+        if not analysis:
+            raise RuntimeError("VLM prepass returned empty analysis")
+        return analysis
 
     @staticmethod
     def _get_last_message(msg: Msg | list[Msg] | None) -> Msg:
-        if isinstance(msg, list):
-            for item in reversed(msg):
-                if isinstance(item, Msg):
-                    return item
-        if isinstance(msg, Msg):
-            return msg
-        return Msg(
-            name="user",
-            role="user",
-            content=[TextBlock(type="text", text="")],
-        )
+        return get_last_message(msg)
 
     def _inject_vlm_analysis_for_llm(
         self,
         msg: Msg | list[Msg] | None,
         analysis: str,
     ) -> Msg | list[Msg] | None:
-        """Remove raw image blocks and inject VLM analysis back to LLM context."""
+        """Remove raw media blocks and inject prepass analysis back to LLM context."""
         target = self._get_last_message(msg)
         analysis_block = TextBlock(
             type="text",
@@ -464,7 +489,8 @@ class CoPawAgent(ReActAgent):
                 block
                 for block in target.content
                 if not (
-                    isinstance(block, dict) and block.get("type") == "image"
+                    isinstance(block, dict)
+                    and block.get("type") in {"image", "audio", "video"}
                 )
             ]
             filtered.append(analysis_block)
@@ -490,7 +516,8 @@ class CoPawAgent(ReActAgent):
                 block
                 for block in target.content
                 if not (
-                    isinstance(block, dict) and block.get("type") == "image"
+                    isinstance(block, dict)
+                    and block.get("type") in {"image", "audio", "video"}
                 )
             ]
             filtered.append(

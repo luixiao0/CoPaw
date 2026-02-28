@@ -17,6 +17,10 @@ from .models import (
     ProviderSettings,
     ProvidersData,
     ResolvedModelConfig,
+    VisionAudioSettings,
+    VisionImageSettings,
+    VisionSettings,
+    VisionVideoSettings,
 )
 from .registry import (
     PROVIDERS,
@@ -185,7 +189,7 @@ def _migrate_legacy_custom(
 
 
 def _parse_new_format(raw: dict):
-    """Returns ``(providers, custom_providers, active_llm, active_vlm, fallbacks)``."""
+    """Returns parsed providers.json fields for the current schema."""
     providers: dict[str, ProviderSettings] = {}
     for key, value in raw.get("providers", {}).items():
         if isinstance(value, dict):
@@ -218,17 +222,24 @@ def _parse_new_format(raw: dict):
                 active_vlm_fallbacks.append(
                     ModelSlotConfig.model_validate(item),
                 )
+    vision_raw = raw.get("vision")
+    vision = (
+        VisionSettings.model_validate(vision_raw)
+        if isinstance(vision_raw, dict)
+        else VisionSettings()
+    )
     return (
         providers,
         custom_providers,
         active_llm,
         active_vlm,
         active_vlm_fallbacks,
+        vision,
     )
 
 
 def _parse_legacy_format(raw: dict):
-    """Returns ``(providers, custom_providers, active_llm, active_vlm, fallbacks)``."""
+    """Returns parsed providers.json fields for legacy schema."""
     providers: dict[str, ProviderSettings] = {}
     custom_providers: dict[str, CustomProviderData] = {}
     old_active = raw.get("active_provider", "")
@@ -248,7 +259,14 @@ def _parse_legacy_format(raw: dict):
         if old_active
         else ModelSlotConfig()
     )
-    return providers, custom_providers, active_llm, ModelSlotConfig(), []
+    return (
+        providers,
+        custom_providers,
+        active_llm,
+        ModelSlotConfig(),
+        [],
+        VisionSettings(),
+    )
 
 
 def _validate_active_llm(data: ProvidersData) -> None:
@@ -326,6 +344,7 @@ def load_providers_json(path: Optional[Path] = None) -> ProvidersData:
     active_llm = ModelSlotConfig()
     active_vlm = ModelSlotConfig()
     active_vlm_fallbacks: list[ModelSlotConfig] = []
+    vision = VisionSettings()
 
     if path.is_file():
         try:
@@ -338,6 +357,7 @@ def load_providers_json(path: Optional[Path] = None) -> ProvidersData:
                     active_llm,
                     active_vlm,
                     active_vlm_fallbacks,
+                    vision,
                 ) = _parse_new_format(raw)
             else:
                 (
@@ -346,6 +366,7 @@ def load_providers_json(path: Optional[Path] = None) -> ProvidersData:
                     active_llm,
                     active_vlm,
                     active_vlm_fallbacks,
+                    vision,
                 ) = _parse_legacy_format(raw)
         except (json.JSONDecodeError, ValueError):
             providers = {}
@@ -362,6 +383,7 @@ def load_providers_json(path: Optional[Path] = None) -> ProvidersData:
         active_llm=active_llm,
         active_vlm=active_vlm,
         active_vlm_fallbacks=active_vlm_fallbacks,
+        vision=vision,
     )
     _validate_active_llm(data)
     _validate_active_vlm(data)
@@ -392,6 +414,7 @@ def save_providers_json(
             slot.model_dump(mode="json")
             for slot in data.active_vlm_fallbacks
         ],
+        "vision": data.vision.model_dump(mode="json"),
     }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=2, ensure_ascii=False)
@@ -469,6 +492,120 @@ def set_active_vlm_fallbacks(
     data.active_vlm_fallbacks = list(fallbacks)
     save_providers_json(data)
     return data
+
+
+def update_vision_image_settings(
+    *,
+    enabled: bool | None = None,
+    attachments_mode: str | None = None,
+    max_images: int | None = None,
+    prompt_override: str | None = None,
+    timeout_seconds: int | None = None,
+    max_output_chars: int | None = None,
+) -> ProvidersData:
+    """Partially update vision.image settings in providers.json."""
+    data = load_providers_json()
+    image = data.vision.image
+    payload: dict = image.model_dump(mode="json")
+    if enabled is not None:
+        payload["enabled"] = bool(enabled)
+    if attachments_mode is not None:
+        mode = attachments_mode.strip().lower()
+        payload["attachments_mode"] = mode if mode in {"first", "all"} else "first"
+    if max_images is not None:
+        payload["max_images"] = max_images
+    if prompt_override is not None:
+        payload["prompt_override"] = prompt_override
+    if timeout_seconds is not None:
+        payload["timeout_seconds"] = timeout_seconds
+    if max_output_chars is not None:
+        payload["max_output_chars"] = max_output_chars
+
+    data.vision.image = VisionImageSettings.model_validate(payload)
+    save_providers_json(data)
+    return data
+
+
+def get_vision_image_settings() -> VisionImageSettings:
+    """Return current vision.image settings."""
+    data = load_providers_json()
+    return data.vision.image
+
+
+def update_vision_audio_settings(
+    *,
+    enabled: bool | None = None,
+    attachments_mode: str | None = None,
+    max_items: int | None = None,
+    prompt_override: str | None = None,
+    timeout_seconds: int | None = None,
+    max_output_chars: int | None = None,
+) -> ProvidersData:
+    """Partially update vision.audio settings in providers.json."""
+    data = load_providers_json()
+    audio = data.vision.audio
+    payload: dict = audio.model_dump(mode="json")
+    if enabled is not None:
+        payload["enabled"] = bool(enabled)
+    if attachments_mode is not None:
+        mode = attachments_mode.strip().lower()
+        payload["attachments_mode"] = mode if mode in {"first", "all"} else "first"
+    if max_items is not None:
+        payload["max_items"] = max_items
+    if prompt_override is not None:
+        payload["prompt_override"] = prompt_override
+    if timeout_seconds is not None:
+        payload["timeout_seconds"] = timeout_seconds
+    if max_output_chars is not None:
+        payload["max_output_chars"] = max_output_chars
+
+    data.vision.audio = VisionAudioSettings.model_validate(payload)
+    save_providers_json(data)
+    return data
+
+
+def get_vision_audio_settings() -> VisionAudioSettings:
+    """Return current vision.audio settings."""
+    data = load_providers_json()
+    return data.vision.audio
+
+
+def update_vision_video_settings(
+    *,
+    enabled: bool | None = None,
+    attachments_mode: str | None = None,
+    max_items: int | None = None,
+    prompt_override: str | None = None,
+    timeout_seconds: int | None = None,
+    max_output_chars: int | None = None,
+) -> ProvidersData:
+    """Partially update vision.video settings in providers.json."""
+    data = load_providers_json()
+    video = data.vision.video
+    payload: dict = video.model_dump(mode="json")
+    if enabled is not None:
+        payload["enabled"] = bool(enabled)
+    if attachments_mode is not None:
+        mode = attachments_mode.strip().lower()
+        payload["attachments_mode"] = mode if mode in {"first", "all"} else "first"
+    if max_items is not None:
+        payload["max_items"] = max_items
+    if prompt_override is not None:
+        payload["prompt_override"] = prompt_override
+    if timeout_seconds is not None:
+        payload["timeout_seconds"] = timeout_seconds
+    if max_output_chars is not None:
+        payload["max_output_chars"] = max_output_chars
+
+    data.vision.video = VisionVideoSettings.model_validate(payload)
+    save_providers_json(data)
+    return data
+
+
+def get_vision_video_settings() -> VisionVideoSettings:
+    """Return current vision.video settings."""
+    data = load_providers_json()
+    return data.vision.video
 
 
 # -- Query --

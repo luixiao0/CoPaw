@@ -223,6 +223,17 @@ Optional overrides for capability heuristics:
 - `COPAW_VISION_MODELS`: comma-separated model ids forced to vision-capable
 - `COPAW_NON_VISION_MODELS`: comma-separated model ids forced to non-vision
 
+Vision prepass attachment policy:
+
+- `COPAW_VISION_ATTACHMENTS_MODE`: `first` (default) or `all`
+- `COPAW_VISION_MAX_IMAGES`: max images when mode is `all` (default `4`)
+
+If you add custom models, you can mark them as vision-capable:
+
+```bash
+copaw models add-model <provider_id> -m <model_id> -n <display_name> --vision
+```
+
 ## Local Models
 
 CoPaw can run LLMs entirely on your machine — no API keys or cloud services required.
