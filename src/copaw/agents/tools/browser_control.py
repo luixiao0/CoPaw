@@ -18,7 +18,9 @@ import sys
 import time
 from typing import Any
 
-from agentscope.message import TextBlock
+from pathlib import Path
+
+from agentscope.message import ImageBlock, TextBlock, URLSource
 from agentscope.tool import ToolResponse
 
 from .browser_snapshot import build_role_snapshot_from_aria
@@ -488,6 +490,71 @@ def _tool_response(text: str) -> ToolResponse:
     )
 
 
+# Actions that change page state and should auto-return a snapshot.
+_MUTATING_ACTIONS: set[str] = {
+    "open", "navigate", "navigate_back", "click", "click_at",
+    "type", "press_key", "select_option", "fill_form",
+    "hover", "drag", "handle_dialog", "wait_for",
+}
+
+# Max chars for the auto-appended snapshot text.
+_AUTO_SNAPSHOT_MAX_CHARS = 8000
+
+
+async def _auto_snapshot_text(
+    page_id: str,
+    frame_selector: str = "",
+) -> str | None:
+    """Generate a compact snapshot to append after mutating actions.
+
+    Returns the snapshot text (truncated) or None on failure.
+    """
+    try:
+        page = _get_page(page_id)
+        if not page:
+            return None
+        root = _get_root(page, page_id, frame_selector)
+        locator = root.locator(":root")
+        raw = await locator.aria_snapshot()
+        raw_str = str(raw) if raw is not None else ""
+        snapshot, refs = build_role_snapshot_from_aria(
+            raw_str, interactive=False, compact=True,
+        )
+        _state["refs"][page_id] = refs
+        _state["refs_frame"][page_id] = (
+            frame_selector.strip() if frame_selector else ""
+        )
+        if len(snapshot) > _AUTO_SNAPSHOT_MAX_CHARS:
+            snapshot = snapshot[:_AUTO_SNAPSHOT_MAX_CHARS] + "\n... (truncated)"
+        ref_list = list(refs.keys())
+        return json.dumps(
+            {
+                "snapshot": snapshot,
+                "refs": ref_list,
+                "url": page.url,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception as exc:
+        logger.debug("Auto-snapshot failed: %s", exc)
+        return None
+
+
+def _append_snapshot_to_response(
+    response: ToolResponse,
+    snapshot_text: str,
+) -> ToolResponse:
+    """Append auto-snapshot text block to an existing ToolResponse."""
+    new_content = list(response.content) + [
+        TextBlock(
+            type="text",
+            text=f"\n[Auto-snapshot (interactive elements)]\n{snapshot_text}\n[/Auto-snapshot]",
+        ),
+    ]
+    return ToolResponse(content=new_content)
+
+
 def _ensure_playwright_async():
     """Import async_playwright; raise ImportError with hint if missing."""
     try:
@@ -560,128 +627,81 @@ async def browser_use(  # pylint: disable=R0911,R0912
     headed: bool = False,
     user_data_dir: str = "",
     channel: str = "",
+    labels: bool = False,
+    x: int = 0,
+    y: int = 0,
 ) -> ToolResponse:
-    """Control browser (Playwright). Default is headless. Use headed=True with
-    action=start to open a visible browser window. Flow: start, open(url),
-    snapshot to get refs, then click/type etc. with ref or selector. Use
-    page_id for multiple tabs.
+    """Browser control (Playwright). One tool, many actions via the `action` param.
 
-    Args:
-        action (str):
-            Required. Action type. Values: start, stop, open, navigate,
-            navigate_back, snapshot, screenshot, click, type, eval, evaluate,
-            resize, console_messages, network_requests, handle_dialog,
-            file_upload, fill_form, install, press_key, run_code, drag, hover,
-            select_option, tabs, wait_for, pdf, close.
-        url (str):
-            URL to open. Required for action=open or navigate.
-        page_id (str):
-            Page/tab identifier, default "default". Use different page_id for
-            multiple tabs.
-        selector (str):
-            CSS selector to locate element for click/type/hover etc. Prefer
-            ref when available.
-        text (str):
-            Text to type. Required for action=type.
-        code (str):
-            JavaScript code. Required for action=eval, evaluate, or run_code.
-        path (str):
-            File path for screenshot save or PDF export.
-        wait (int):
-            Milliseconds to wait after click. Used with action=click.
-        full_page (bool):
-            Whether to capture full page. Used with action=screenshot.
-        width (int):
-            Viewport width in pixels. Used with action=resize.
-        height (int):
-            Viewport height in pixels. Used with action=resize.
-        level (str):
-            Console log level filter, e.g. "info" or "error". Used with
-            action=console_messages.
-        filename (str):
-            Filename for saving logs or screenshot. Used with
-            console_messages, network_requests, screenshot.
-        accept (bool):
-            Whether to accept dialog (true) or dismiss (false). Used with
-            action=handle_dialog.
-        prompt_text (str):
-            Input for prompt dialog. Used with action=handle_dialog when
-            dialog is prompt.
-        ref (str):
-            Element ref from snapshot output; use for stable targeting. Prefer
-            ref for click/type/hover/screenshot/evaluate/select_option.
-        element (str):
-            Element description for evaluate etc. Prefer ref when available.
-        paths_json (str):
-            JSON array string of file paths. Used with action=file_upload.
-        fields_json (str):
-            JSON object string of form field name to value. Used with
-            action=fill_form.
-        key (str):
-            Key name, e.g. "Enter", "Control+a". Required for
-            action=press_key.
-        submit (bool):
-            Whether to submit (press Enter) after typing. Used with
-            action=type.
-        slowly (bool):
-            Whether to type character by character. Used with action=type.
-        include_static (bool):
-            Whether to include static resource requests. Used with
-            action=network_requests.
-        screenshot_type (str):
-            Screenshot format, "png" or "jpeg". Used with action=screenshot.
-        snapshot_filename (str):
-            File path to save snapshot output. Used with action=snapshot.
-        double_click (bool):
-            Whether to double-click. Used with action=click.
-        button (str):
-            Mouse button: "left", "right", or "middle". Used with
-            action=click.
-        modifiers_json (str):
-            JSON array of modifier keys, e.g. ["Shift","Control"]. Used with
-            action=click.
-        start_ref (str):
-            Drag start element ref. Used with action=drag.
-        end_ref (str):
-            Drag end element ref. Used with action=drag.
-        start_selector (str):
-            Drag start CSS selector. Used with action=drag.
-        end_selector (str):
-            Drag end CSS selector. Used with action=drag.
-        start_element (str):
-            Drag start element description. Used with action=drag.
-        end_element (str):
-            Drag end element description. Used with action=drag.
-        values_json (str):
-            JSON of option value(s) for select. Used with
-            action=select_option.
-        tab_action (str):
-            Tab action: list, new, close, or select. Required for
-            action=tabs.
-        index (int):
-            Tab index for tabs select, zero-based. Used with action=tabs.
-        wait_time (float):
-            Seconds to wait. Used with action=wait_for.
-        text_gone (str):
-            Wait until this text disappears from page. Used with
-            action=wait_for.
-        frame_selector (str):
-            iframe selector, e.g. "iframe#main". Set when operating inside
-            that iframe in snapshot/click/type etc.
-        headed (bool):
-            When True with action=start, launch a visible browser window
-            (non-headless). User can see the real browser. Default False.
-        user_data_dir (str):
-            Path to a Chrome/Chromium user data directory. When provided
-            with action=start, a persistent browser context is launched
-            that shares cookies, localStorage, and login sessions with the
-            real browser. Pass "auto" to auto-detect the default Chrome
-            profile. IMPORTANT: the real Chrome must be fully closed first.
-        channel (str):
-            Browser channel. Set to "chrome" or "msedge" with action=start
-            to use the user's installed Chrome/Edge instead of bundled
-            Chromium. Pass "auto" to auto-detect. Only effective with
-            action=start.
+    ## Typical workflows
+
+    BROWSE: start(headed=True) -> open(url) -> read auto-snapshot -> click(ref) -> read auto-snapshot -> ...
+    NAVIGATE: navigate(url) to go to a new URL on an existing page (open creates the first page)
+    VISUAL: screenshot(path) -> (VLM auto-describes if configured) -> reason about visual content
+    FIND:   snapshot() -> search for ref in tree -> click(ref)
+
+    ## Key behaviors
+
+    - Actions that change page state (click, type, navigate, etc.) automatically
+      return an updated accessibility snapshot of interactive elements. You do NOT
+      need to call snapshot after every action.
+    - Use snapshot() only when you need the FULL tree or to refresh refs.
+    - Use screenshot() only when you need VISUAL content (images, colors, layout)
+      that the text snapshot cannot provide.
+    - Use snapshot(labels=True) to get a labeled screenshot with ref bounding boxes
+      overlaid, useful for visual grounding.
+    - Target elements by ref (from snapshot), e.g. click(ref="e5"). Prefer ref over selector.
+
+    ## Actions
+
+    Lifecycle: start, stop, install
+    Navigation: open(url), navigate(url), navigate_back, close
+    Inspection: snapshot, screenshot
+    Interaction: click(ref), click_at(x,y), type(ref,text), press_key(key),
+                 hover(ref), drag(start_ref,end_ref), select_option(ref,values_json),
+                 fill_form(fields_json), file_upload(paths_json), handle_dialog(accept)
+    Advanced: eval(code), evaluate(ref,code), run_code(code), resize(width,height),
+              console_messages, network_requests, tabs(tab_action), wait_for, pdf
+
+    ## Parameters (by action)
+
+    action (str): Required. See list above.
+    url (str): For open, navigate.
+    ref (str): Element ref from snapshot (e.g. "e5"). For click, type, hover, evaluate, select_option, screenshot.
+    text (str): For type. Text to enter.
+    key (str): For press_key. E.g. "Enter", "Control+a".
+    code (str): For eval, evaluate, run_code. JavaScript code.
+    path (str): For screenshot, pdf. File path to save.
+    selector (str): CSS selector fallback when ref unavailable.
+    x, y (int): For click_at. Viewport coordinates.
+    labels (bool): For snapshot. Overlay ref labels on screenshot.
+    headed (bool): For start. True = visible browser window.
+    user_data_dir (str): For start. Chrome profile path or "auto".
+    channel (str): For start. "chrome", "msedge", or "auto".
+    page_id (str): Tab identifier, default "default".
+    frame_selector (str): iframe CSS selector for operating inside iframes.
+    submit (bool): For type. Press Enter after typing.
+    slowly (bool): For type. Type character by character.
+    full_page (bool): For screenshot. Capture full page.
+    double_click (bool): For click. Double-click instead.
+    button (str): For click. "left"/"right"/"middle".
+    modifiers_json (str): For click. JSON array, e.g. '["Shift"]'.
+    start_ref, end_ref (str): For drag.
+    values_json (str): For select_option. JSON array of values.
+    fields_json (str): For fill_form. JSON object {field: value}.
+    paths_json (str): For file_upload. JSON array of file paths.
+    tab_action (str): For tabs. "list"/"new"/"close"/"select".
+    index (int): For tabs select. Zero-based tab index.
+    accept (bool): For handle_dialog. True=accept, False=dismiss.
+    prompt_text (str): For handle_dialog. Input text for prompt dialogs.
+    wait_time (float): For wait_for. Seconds to wait.
+    text_gone (str): For wait_for. Wait until this text disappears.
+    wait (int): For click. Milliseconds to wait before clicking.
+    level (str): For console_messages. Filter level.
+    filename (str): For console_messages, network_requests. Save to file.
+    include_static (bool): For network_requests. Include static resources.
+    screenshot_type (str): For screenshot. "png" or "jpeg".
+    snapshot_filename (str): For snapshot. Save tree to file.
     """
     action = (action or "").strip().lower()
     if not action:
@@ -703,6 +723,7 @@ async def browser_use(  # pylint: disable=R0911,R0912
     if page_id == "default" and current and current in pages:
         page_id = current
 
+    result: ToolResponse | None = None
     try:
         if action == "start":
             return await _action_start(
@@ -713,12 +734,12 @@ async def browser_use(  # pylint: disable=R0911,R0912
         if action == "stop":
             return await _action_stop()
         if action == "open":
-            return await _action_open(url, page_id)
-        if action == "navigate":
-            return await _action_navigate(url, page_id)
-        if action == "navigate_back":
-            return await _action_navigate_back(page_id)
-        if action in ("screenshot", "take_screenshot"):
+            result = await _action_open(url, page_id)
+        elif action == "navigate":
+            result = await _action_navigate(url, page_id)
+        elif action == "navigate_back":
+            result = await _action_navigate_back(page_id)
+        elif action in ("screenshot", "take_screenshot"):
             return await _action_screenshot(
                 page_id,
                 path or filename,
@@ -728,14 +749,23 @@ async def browser_use(  # pylint: disable=R0911,R0912
                 element,
                 frame_selector,
             )
-        if action == "snapshot":
+        elif action == "snapshot":
             return await _action_snapshot(
                 page_id,
                 snapshot_filename or filename,
                 frame_selector,
+                labels=labels,
             )
-        if action == "click":
-            return await _action_click(
+        elif action == "click_at":
+            result = await _action_click_at(
+                page_id,
+                x,
+                y,
+                button,
+                double_click,
+            )
+        elif action == "click":
+            result = await _action_click(
                 page_id,
                 selector,
                 ref,
@@ -746,8 +776,8 @@ async def browser_use(  # pylint: disable=R0911,R0912
                 modifiers_json,
                 frame_selector,
             )
-        if action == "type":
-            return await _action_type(
+        elif action == "type":
+            result = await _action_type(
                 page_id,
                 selector,
                 ref,
@@ -757,9 +787,9 @@ async def browser_use(  # pylint: disable=R0911,R0912
                 slowly,
                 frame_selector,
             )
-        if action == "eval":
+        elif action == "eval":
             return await _action_eval(page_id, code)
-        if action == "evaluate":
+        elif action == "evaluate":
             return await _action_evaluate(
                 page_id,
                 code,
@@ -767,34 +797,34 @@ async def browser_use(  # pylint: disable=R0911,R0912
                 element,
                 frame_selector,
             )
-        if action == "resize":
+        elif action == "resize":
             return await _action_resize(page_id, width, height)
-        if action == "console_messages":
+        elif action == "console_messages":
             return await _action_console_messages(
                 page_id,
                 level,
                 filename or path,
             )
-        if action == "handle_dialog":
-            return await _action_handle_dialog(page_id, accept, prompt_text)
-        if action == "file_upload":
+        elif action == "handle_dialog":
+            result = await _action_handle_dialog(page_id, accept, prompt_text)
+        elif action == "file_upload":
             return await _action_file_upload(page_id, paths_json)
-        if action == "fill_form":
-            return await _action_fill_form(page_id, fields_json)
-        if action == "install":
+        elif action == "fill_form":
+            result = await _action_fill_form(page_id, fields_json)
+        elif action == "install":
             return await _action_install()
-        if action == "press_key":
-            return await _action_press_key(page_id, key)
-        if action == "network_requests":
+        elif action == "press_key":
+            result = await _action_press_key(page_id, key)
+        elif action == "network_requests":
             return await _action_network_requests(
                 page_id,
                 include_static,
                 filename or path,
             )
-        if action == "run_code":
+        elif action == "run_code":
             return await _action_run_code(page_id, code)
-        if action == "drag":
-            return await _action_drag(
+        elif action == "drag":
+            result = await _action_drag(
                 page_id,
                 start_ref,
                 end_ref,
@@ -804,37 +834,46 @@ async def browser_use(  # pylint: disable=R0911,R0912
                 end_element,
                 frame_selector,
             )
-        if action == "hover":
-            return await _action_hover(
+        elif action == "hover":
+            result = await _action_hover(
                 page_id,
                 ref,
                 element,
                 selector,
                 frame_selector,
             )
-        if action == "select_option":
-            return await _action_select_option(
+        elif action == "select_option":
+            result = await _action_select_option(
                 page_id,
                 ref,
                 element,
                 values_json,
                 frame_selector,
             )
-        if action == "tabs":
+        elif action == "tabs":
             return await _action_tabs(page_id, tab_action, index)
-        if action == "wait_for":
-            return await _action_wait_for(page_id, wait_time, text, text_gone)
-        if action == "pdf":
+        elif action == "wait_for":
+            result = await _action_wait_for(page_id, wait_time, text, text_gone)
+        elif action == "pdf":
             return await _action_pdf(page_id, path)
-        if action == "close":
+        elif action == "close":
             return await _action_close(page_id)
-        return _tool_response(
-            json.dumps(
-                {"ok": False, "error": f"Unknown action: {action}"},
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
+        else:
+            return _tool_response(
+                json.dumps(
+                    {"ok": False, "error": f"Unknown action: {action}"},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+        # Auto-append compact snapshot after mutating actions.
+        if result is not None and action in _MUTATING_ACTIONS:
+            snap = await _auto_snapshot_text(page_id, frame_selector)
+            if snap:
+                result = _append_snapshot_to_response(result, snap)
+
+        return result
     except Exception as e:
         logger.error("Browser tool error: %s", e, exc_info=True)
         return _tool_response(
@@ -1338,16 +1377,29 @@ async def _action_screenshot(
                     if screenshot_type == "jpeg"
                     else "png",
                 )
-        return _tool_response(
-            json.dumps(
-                {
-                    "ok": True,
-                    "message": f"Screenshot saved to {path}",
-                    "path": path,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+        abs_path = str(Path(path).resolve())
+        return ToolResponse(
+            content=[
+                TextBlock(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "ok": True,
+                            "message": f"Screenshot saved to {path}",
+                            "path": abs_path,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                ),
+                ImageBlock(
+                    type="image",
+                    source=URLSource(
+                        type="url",
+                        url=Path(abs_path).as_uri(),
+                    ),
+                ),
+            ],
         )
     except Exception as e:
         return _tool_response(
@@ -1438,6 +1490,51 @@ async def _action_click(  # pylint: disable=too-many-branches
         return _tool_response(
             json.dumps(
                 {"ok": False, "error": f"Click failed: {e!s}"},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
+
+async def _action_click_at(
+    page_id: str,
+    x: int,
+    y: int,
+    button: str = "left",
+    double_click: bool = False,
+) -> ToolResponse:
+    """Click at raw viewport coordinates (x, y)."""
+    page = _get_page(page_id)
+    if not page:
+        return _tool_response(
+            json.dumps(
+                {"ok": False, "error": f"Page '{page_id}' not found"},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    btn = button if button in ("left", "right", "middle") else "left"
+    try:
+        if double_click:
+            await page.mouse.dblclick(x, y, button=btn)
+        else:
+            await page.mouse.click(x, y, button=btn)
+        return _tool_response(
+            json.dumps(
+                {
+                    "ok": True,
+                    "message": f"Clicked at ({x}, {y})",
+                    "x": x,
+                    "y": y,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    except Exception as e:
+        return _tool_response(
+            json.dumps(
+                {"ok": False, "error": f"click_at failed: {e!s}"},
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -1638,10 +1735,131 @@ async def _action_close(page_id: str) -> ToolResponse:
         )
 
 
+_MAX_LABELS = 100
+
+_JS_OVERLAY_LABELS = """
+(labels) => {
+    const existing = document.querySelectorAll("[data-copaw-labels]");
+    existing.forEach(el => el.remove());
+    const root = document.createElement("div");
+    root.setAttribute("data-copaw-labels", "1");
+    root.style.position = "fixed";
+    root.style.left = "0";
+    root.style.top = "0";
+    root.style.zIndex = "2147483647";
+    root.style.pointerEvents = "none";
+    root.style.fontFamily = '"SF Mono",SFMono-Regular,Menlo,Monaco,Consolas,monospace';
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    for (const lb of labels) {
+        const box = document.createElement("div");
+        box.setAttribute("data-copaw-labels", "1");
+        box.style.position = "absolute";
+        box.style.left = lb.x + "px";
+        box.style.top = lb.y + "px";
+        box.style.width = lb.w + "px";
+        box.style.height = lb.h + "px";
+        box.style.border = "2px solid #ffb020";
+        box.style.boxSizing = "border-box";
+        const tag = document.createElement("div");
+        tag.setAttribute("data-copaw-labels", "1");
+        tag.textContent = lb.ref;
+        tag.style.position = "absolute";
+        tag.style.left = lb.x + "px";
+        tag.style.top = clamp(lb.y - 18, 0, 20000) + "px";
+        tag.style.background = "#ffb020";
+        tag.style.color = "#1a1a1a";
+        tag.style.fontSize = "12px";
+        tag.style.lineHeight = "14px";
+        tag.style.padding = "1px 4px";
+        tag.style.borderRadius = "3px";
+        tag.style.boxShadow = "0 1px 2px rgba(0,0,0,0.35)";
+        tag.style.whiteSpace = "nowrap";
+        root.appendChild(box);
+        root.appendChild(tag);
+    }
+    document.documentElement.appendChild(root);
+}
+"""
+
+_JS_REMOVE_LABELS = """
+() => {
+    const existing = document.querySelectorAll("[data-copaw-labels]");
+    existing.forEach(el => el.remove());
+}
+"""
+
+
+async def _overlay_labels_and_screenshot(
+    page,
+    refs_dict: dict[str, dict],
+    page_id: str,
+    frame_selector: str = "",
+) -> tuple[bytes, int, int]:
+    """Overlay ref bounding-box labels on page, screenshot, then remove.
+
+    Returns (screenshot_bytes, labels_drawn, labels_skipped).
+    """
+    viewport = await page.evaluate(
+        "() => ({"
+        "scrollX: window.scrollX || 0,"
+        "scrollY: window.scrollY || 0,"
+        "width: window.innerWidth || 0,"
+        "height: window.innerHeight || 0"
+        "})",
+    )
+    vx0 = viewport["scrollX"]
+    vy0 = viewport["scrollY"]
+    vx1 = vx0 + viewport["width"]
+    vy1 = vy0 + viewport["height"]
+
+    boxes: list[dict] = []
+    skipped = 0
+    for ref in refs_dict:
+        if len(boxes) >= _MAX_LABELS:
+            skipped += 1
+            continue
+        locator = _get_locator_by_ref(page, page_id, ref, frame_selector)
+        if locator is None:
+            skipped += 1
+            continue
+        try:
+            box = await locator.bounding_box()
+        except Exception:
+            skipped += 1
+            continue
+        if box is None:
+            skipped += 1
+            continue
+        x0, y0 = box["x"], box["y"]
+        x1, y1 = x0 + box["width"], y0 + box["height"]
+        if x1 < vx0 or x0 > vx1 or y1 < vy0 or y0 > vy1:
+            skipped += 1
+            continue
+        boxes.append({
+            "ref": ref,
+            "x": x0 - viewport["scrollX"],
+            "y": y0 - viewport["scrollY"],
+            "w": max(1, box["width"]),
+            "h": max(1, box["height"]),
+        })
+
+    try:
+        if boxes:
+            await page.evaluate(_JS_OVERLAY_LABELS, boxes)
+        screenshot_bytes = await page.screenshot(type="png")
+        return screenshot_bytes, len(boxes), skipped
+    finally:
+        try:
+            await page.evaluate(_JS_REMOVE_LABELS)
+        except Exception:
+            pass
+
+
 async def _action_snapshot(
     page_id: str,
     filename: str,
     frame_selector: str = "",
+    labels: bool = False,
 ) -> ToolResponse:
     page = _get_page(page_id)
     if not page:
@@ -1666,7 +1884,7 @@ async def _action_snapshot(
         _state["refs_frame"][page_id] = (
             frame_selector.strip() if frame_selector else ""
         )
-        out = {
+        out: dict[str, Any] = {
             "ok": True,
             "snapshot": snapshot,
             "refs": list(refs.keys()),
@@ -1678,7 +1896,42 @@ async def _action_snapshot(
             with open(filename.strip(), "w", encoding="utf-8") as f:
                 f.write(snapshot)
             out["filename"] = filename.strip()
-        return _tool_response(json.dumps(out, ensure_ascii=False, indent=2))
+
+        if not labels:
+            return _tool_response(
+                json.dumps(out, ensure_ascii=False, indent=2),
+            )
+
+        img_bytes, drawn, skipped = await _overlay_labels_and_screenshot(
+            page,
+            refs,
+            page_id,
+            frame_selector,
+        )
+        out["labels"] = True
+        out["labels_drawn"] = drawn
+        out["labels_skipped"] = skipped
+
+        img_path = f"snapshot-labels-{int(time.time())}.png"
+        Path(img_path).write_bytes(img_bytes)
+        abs_path = str(Path(img_path).resolve())
+        out["image_path"] = abs_path
+
+        return ToolResponse(
+            content=[
+                TextBlock(
+                    type="text",
+                    text=json.dumps(out, ensure_ascii=False, indent=2),
+                ),
+                ImageBlock(
+                    type="image",
+                    source=URLSource(
+                        type="url",
+                        url=Path(abs_path).as_uri(),
+                    ),
+                ),
+            ],
+        )
     except Exception as e:
         return _tool_response(
             json.dumps(

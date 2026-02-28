@@ -166,30 +166,15 @@ async def download_file_from_base64(
             guessed = _guess_suffix_from_file_content(local_file_path)
             if guessed:
                 new_path = local_file_path.with_suffix(guessed)
-                local_file_path.rename(new_path)
-                local_file_path = new_path
+                if new_path.exists():
+                    # Same content hash can reappear across turns; keep existing
+                    # suffixed file and remove temporary extensionless file.
+                    local_file_path.unlink(missing_ok=True)
+                    local_file_path = new_path
+                else:
+                    local_file_path.rename(new_path)
+                    local_file_path = new_path
                 logger.debug("Added suffix %s for base64 download: %s", guessed, local_file_path)
-
-        # #region agent log
-        try:
-            with open(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "debug-ecbb34.log"), "a", encoding="utf-8") as _dbg:
-                _dbg.write(
-                    os.linesep
-                    + __import__("json").dumps(
-                        {
-                            "sessionId": "ecbb34",
-                            "hypothesisId": "H1",
-                            "location": "file_handling.py:download_file_from_base64",
-                            "message": "path after save",
-                            "data": {"path": str(local_file_path.absolute()), "has_extension": bool(local_file_path.suffix)},
-                            "timestamp": __import__("time").time_ns() // 1_000_000,
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-        except Exception:
-            pass
-        # #endregion
 
         logger.debug("Downloaded file to: %s", local_file_path)
         return str(local_file_path.absolute())

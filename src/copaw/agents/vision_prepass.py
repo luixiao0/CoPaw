@@ -1,61 +1,58 @@
 # -*- coding: utf-8 -*-
-"""Vision prepass prompt and normalization helpers."""
+"""Vision prepass prompt and normalization helpers.
+
+OpenClaw-aligned: free-form description output instead of rigid JSON schema.
+"""
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Literal
 
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
-_OBJECT_RE = re.compile(r"(\{[\s\S]*\})")
+_MAX_DESCRIPTION_CHARS = 500
 
 
 def build_vlm_prepass_prompt(user_text: str, selected_image_count: int) -> str:
-    return (
-        "You are a vision preprocessor for a stronger text-only planner.\n"
-        "Analyze the provided images and return ONLY valid JSON.\n"
-        "Do NOT answer the user directly and do NOT invent unseen details.\n\n"
-        "Required JSON schema:\n"
-        "{\n"
-        '  "ocr_text": ["..."],\n'
-        '  "key_entities": ["..."],\n'
-        '  "spatial_layout_cues": ["..."],\n'
-        '  "ambiguities": ["..."],\n'
-        '  "follow_up_checks": ["..."],\n'
-        '  "confidence": "low|medium|high"\n'
-        "}\n\n"
-        f"Selected image count: {selected_image_count}\n"
-        f"User task:\n{user_text}"
-    )
+    """Build a simple, free-form image description prompt.
+
+    Mirrors OpenClaw's approach: ask the VLM to describe the image in natural
+    language rather than demanding a rigid JSON schema.  This produces richer,
+    more reliable output from most VLMs.
+    """
+    parts = [
+        "You are a vision preprocessor. "
+        "Describe the provided image(s) concisely and accurately.",
+        "Include: visible text (OCR), key objects/entities, layout, and any ambiguities.",
+        "Do NOT answer the user's question directly — only describe what you see.",
+        "Do NOT claim you cannot view the image.",
+        "Do NOT request external tools.",
+    ]
+    if selected_image_count > 1:
+        parts.append(f"Number of images: {selected_image_count}")
+    if user_text and user_text.strip():
+        parts.append(f"User's task context (for relevance): {user_text.strip()}")
+    return "\n".join(parts)
 
 
 def normalize_vlm_prepass_output(raw: str) -> str:
-    """Normalize arbitrary VLM output into a stable JSON contract."""
-    parsed = _parse_json_payload(raw)
-    if not isinstance(parsed, dict):
-        parsed = {"raw_summary": (raw or "").strip()}
-
-    normalized = {
-        "ocr_text": _norm_list(parsed.get("ocr_text")),
-        "key_entities": _norm_list(parsed.get("key_entities")),
-        "spatial_layout_cues": _norm_list(parsed.get("spatial_layout_cues")),
-        "ambiguities": _norm_list(parsed.get("ambiguities")),
-        "follow_up_checks": _norm_list(parsed.get("follow_up_checks")),
-        "confidence": _norm_confidence(parsed.get("confidence")),
-    }
-    return json.dumps(normalized, ensure_ascii=False)
+    """Pass through free-form VLM description, trimming to size limit."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if len(text) > _MAX_DESCRIPTION_CHARS:
+        text = text[:_MAX_DESCRIPTION_CHARS - 3] + "..."
+    return text
 
 
 def format_vlm_prepass_context(
     capability: Literal["image", "audio", "video"],
-    normalized_json: str,
+    description: str,
     *,
     user_text: str = "",
+    include_user_text: bool = True,
 ) -> str:
-    """Render normalized prepass JSON into readable context text."""
-    parsed = _parse_json_payload(normalized_json)
-    if not isinstance(parsed, dict):
+    """Render VLM description into OpenClaw-style section text."""
+    text = (description or "").strip()
+    if not text:
         return ""
 
     label = {
@@ -64,87 +61,11 @@ def format_vlm_prepass_context(
         "video": "Video",
     }.get(capability, "Media")
 
-    ocr = _norm_list(parsed.get("ocr_text"))
-    entities = _norm_list(parsed.get("key_entities"))
-    layout = _norm_list(parsed.get("spatial_layout_cues"))
-    ambiguities = _norm_list(parsed.get("ambiguities"))
-    follow_ups = _norm_list(parsed.get("follow_up_checks"))
-    confidence = _norm_confidence(parsed.get("confidence"))
-
+    content_title = "Transcript" if capability == "audio" else "Description"
     lines: list[str] = [f"[{label}]"]
     cleaned_user_text = (user_text or "").strip()
-    if cleaned_user_text:
+    if include_user_text and cleaned_user_text:
         lines.append(f"User text:\n{cleaned_user_text}")
-    if ocr:
-        lines.append("OCR:\n- " + "\n- ".join(ocr))
-    if entities:
-        lines.append("Key entities:\n- " + "\n- ".join(entities))
-    if layout:
-        lines.append("Layout cues:\n- " + "\n- ".join(layout))
-    if ambiguities:
-        lines.append("Ambiguities:\n- " + "\n- ".join(ambiguities))
-    if follow_ups:
-        lines.append("Follow-up checks:\n- " + "\n- ".join(follow_ups))
-    lines.append(f"Confidence: {confidence}")
+    lines.append(f"{content_title}:\n{text}")
     return "\n".join(lines)
-
-
-def _parse_json_payload(raw: str):
-    if not raw:
-        return None
-    txt = raw.strip()
-    try:
-        return json.loads(txt)
-    except Exception:
-        pass
-
-    m = _JSON_BLOCK_RE.search(txt)
-    if m:
-        candidate = m.group(1)
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
-
-    m = _OBJECT_RE.search(txt)
-    if m:
-        candidate = m.group(1)
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
-    return None
-
-
-def _norm_list(value, max_items: int = 8, max_item_len: int = 280) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    out = []
-    for item in value:
-        text = str(item).strip()
-        if not text:
-            continue
-        if len(text) > max_item_len:
-            text = text[: max_item_len - 3] + "..."
-        out.append(text)
-        if len(out) >= max_items:
-            break
-    return out
-
-
-def _norm_confidence(value) -> str:
-    if not value:
-        return "medium"
-    s = str(value).strip().lower()
-    if s in {"low", "medium", "high"}:
-        return s
-    if s in {"uncertain", "weak"}:
-        return "low"
-    if s in {"strong", "certain"}:
-        return "high"
-    return "medium"
 

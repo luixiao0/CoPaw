@@ -4,9 +4,11 @@
 This module provides the main CoPawAgent class built on ReActAgent,
 with integrated tools, skills, and memory management.
 """
+import json
 import logging
 import os
 import asyncio
+import time
 from typing import Any, List, Optional, Type
 
 from agentscope.agent import ReActAgent
@@ -15,7 +17,7 @@ from agentscope.tool import Toolkit
 from pydantic import BaseModel
 
 from .command_handler import CommandHandler
-from .hooks import BootstrapHook, MemoryCompactionHook
+from .hooks import BootstrapHook, MemoryCompactionHook, ToolResultVLMPrepassHook
 from .memory import CoPawInMemoryMemory
 from .model_capabilities import supports_input_capability
 from .model_factory import (
@@ -28,6 +30,7 @@ from .image_understanding import (
     run_media_understanding_prepass,
 )
 from .vision_prepass import format_vlm_prepass_context
+from .vlm_auto_discover import auto_discover_vlm
 from .prompt import build_system_prompt_from_working_dir
 from .skills_manager import (
     ensure_skills_initialized,
@@ -121,6 +124,22 @@ class CoPawAgent(ReActAgent):
         self._active_vlm_cfg = get_active_vlm_config()
         self._active_vlm_fallback_cfgs = get_active_vlm_fallback_configs()
         self._vision_settings = load_providers_json().vision
+
+        # Auto-discover a VLM if none is explicitly configured.
+        if (
+            self._active_vlm_cfg is None
+            and not self._active_vlm_fallback_cfgs
+            and self._active_llm_cfg is not None
+            and not supports_input_capability(self._active_llm_cfg, "image")
+        ):
+            discovered = auto_discover_vlm(self._active_llm_cfg)
+            if discovered is not None:
+                logger.info(
+                    "Auto-discovered VLM: %s/%s",
+                    discovered.provider_id,
+                    discovered.model,
+                )
+                self._active_vlm_cfg = discovered
 
         if self._active_llm_cfg is not None:
             model, self._vlm_model, formatter = create_text_and_vlm_models(
@@ -278,6 +297,20 @@ class CoPawAgent(ReActAgent):
             )
             logger.debug("Registered memory compaction hook")
 
+        # Tool-result VLM prepass hook - describe images in tool results
+        # when the primary LLM is text-only and a VLM is available.
+        if self._vlm_model is not None and (
+            self._active_llm_cfg is None
+            or not supports_input_capability(self._active_llm_cfg, "image")
+        ):
+            tool_result_vlm_hook = ToolResultVLMPrepassHook()
+            self.register_instance_hook(
+                hook_type="pre_reasoning",
+                hook_name="tool_result_vlm_prepass_hook",
+                hook=tool_result_vlm_hook.__call__,
+            )
+            logger.debug("Registered tool-result VLM prepass hook")
+
     def rebuild_sys_prompt(self) -> None:
         """Rebuild and replace the system prompt.
 
@@ -313,6 +346,10 @@ class CoPawAgent(ReActAgent):
         Returns:
             Response message
         """
+        # OpenClaw-style hygiene: prune image blocks from already-answered
+        # user turns in history to avoid stale multimodal payload buildup.
+        self._prune_processed_history_images()
+
         # Process file and media blocks in messages
         if msg is not None:
             await process_file_and_media_blocks_in_message(msg)
@@ -332,7 +369,8 @@ class CoPawAgent(ReActAgent):
         # Capability-aware routing: media input goes to prepass only when
         # primary LLM lacks required modalities.
         capabilities = self._message_media_capabilities(msg)
-        if capabilities and self._should_route_to_vlm(msg, capabilities):
+        should_route = bool(capabilities) and self._should_route_to_vlm(msg, capabilities)
+        if should_route:
             raw_analyses: list[str] = []
             readable_analyses: list[str] = []
             failures: list[str] = []
@@ -356,6 +394,7 @@ class CoPawAgent(ReActAgent):
                         capability,
                         result.analysis,
                         user_text=user_text,
+                        include_user_text=False,
                     )
                     if readable:
                         readable_analyses.append(readable)
@@ -372,16 +411,80 @@ class CoPawAgent(ReActAgent):
                 msg = self._inject_vlm_analysis_for_llm(
                     msg,
                     raw_analysis="\n".join(raw_analyses),
-                    readable_analysis="\n\n".join(readable_analyses),
+                    readable_analysis=self._compose_media_understanding_context(
+                        readable_analyses,
+                        user_text=user_text,
+                    ),
                 )
             if failures:
                 msg = self._inject_vlm_failure_for_llm(
                     msg,
                     "; ".join(failures),
                 )
+            # OpenClaw-aligned behavior: when routed through VLM because
+            # primary LLM lacks multimodal input, do not forward raw media
+            # blocks to the primary LLM request.
+            msg = self._strip_media_blocks_for_primary_llm(msg)
 
         # Normal message processing (or no VLM configured)
-        return await super().reply(msg=msg, structured_model=structured_model)
+        reply_msg = await super().reply(msg=msg, structured_model=structured_model)
+
+        # Log the final AI reply
+        if isinstance(reply_msg, Msg):
+            reply_text = reply_msg.get_text_content() if hasattr(reply_msg, "get_text_content") else str(reply_msg.content)
+            if reply_text:
+                preview = reply_text.strip()
+                if len(preview) > 500:
+                    preview = preview[:497] + "..."
+                logger.info("AI reply:\n%s", preview)
+
+        return reply_msg
+
+    def _prune_processed_history_images(self) -> None:
+        """Prune image blocks in answered user turns from memory history."""
+        entries = getattr(self.memory, "content", None)
+        if not isinstance(entries, list) or not entries:
+            return
+        msgs: list[Msg] = []
+        for entry in entries:
+            if isinstance(entry, tuple) and len(entry) > 0 and isinstance(entry[0], Msg):
+                msgs.append(entry[0])
+        last_assistant_idx = -1
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i].role == "assistant":
+                last_assistant_idx = i
+                break
+        if last_assistant_idx < 0:
+            return
+        replaced_blocks = 0
+        for i in range(last_assistant_idx):
+            msg = msgs[i]
+            if msg.role != "user" or not isinstance(msg.content, list):
+                continue
+            for j, block in enumerate(msg.content):
+                if isinstance(block, dict) and block.get("type") == "image":
+                    msg.content[j] = {
+                        "type": "text",
+                        "text": "[image data removed - already processed by model]",
+                    }
+                    replaced_blocks += 1
+
+    @staticmethod
+    def _compose_media_understanding_context(
+        sections: list[str],
+        *,
+        user_text: str = "",
+    ) -> str:
+        """Compose sections in OpenClaw-style merge order."""
+        clean_sections = [s.strip() for s in sections if isinstance(s, str) and s.strip()]
+        if not clean_sections:
+            return ""
+        cleaned_user_text = (user_text or "").strip()
+        if cleaned_user_text and len(clean_sections) > 1:
+            return "User text:\n" + cleaned_user_text + "\n\n" + "\n\n".join(clean_sections)
+        if cleaned_user_text and len(clean_sections) == 1:
+            return "User text:\n" + cleaned_user_text + "\n\n" + clean_sections[0]
+        return "\n\n".join(clean_sections)
 
     def _should_route_to_vlm(
         self,
@@ -495,6 +598,8 @@ class CoPawAgent(ReActAgent):
                 msg=msg,
                 structured_model=None,
                 persist_to_memory=False,
+                suppress_output=True,
+                disable_tools=True,
             ),
             timeout=max(1, timeout_seconds),
         )
@@ -513,25 +618,18 @@ class CoPawAgent(ReActAgent):
         raw_analysis: str,
         readable_analysis: str = "",
     ) -> Msg | list[Msg] | None:
-        """Inject both raw and readable media analysis into LLM context."""
+        """Inject media analysis context in a description-first style.
+
+        OpenClaw-style behavior: avoid injecting raw machine JSON into the
+        primary LLM prompt. Keep only human-readable description text.
+        """
         target = self._get_last_message(msg)
-        sections = [
-            "[VisionPrepass]",
-            raw_analysis,
-            "[/VisionPrepass]",
-        ]
-        if readable_analysis.strip():
-            sections.extend(
-                [
-                    "",
-                    "[MediaUnderstanding]",
-                    readable_analysis,
-                    "[/MediaUnderstanding]",
-                ],
-            )
+        clean_readable = (readable_analysis or "").strip()
+        if not clean_readable:
+            clean_readable = "[Image]\nDescription:\n- No reliable visual details extracted."
         analysis_block = TextBlock(
             type="text",
-            text="\n".join(sections),
+            text=clean_readable,
         )
 
         if isinstance(target.content, list):
@@ -569,20 +667,148 @@ class CoPawAgent(ReActAgent):
             ]
         return msg
 
+    @staticmethod
+    def _strip_media_blocks_for_primary_llm(
+        msg: Msg | list[Msg] | None,
+    ) -> Msg | list[Msg] | None:
+        """Remove image/audio/video blocks from latest user message."""
+        target = get_last_message(msg)
+        if not isinstance(target, Msg) or not isinstance(target.content, list):
+            return msg
+        before_count = len(target.content)
+        target.content = [
+            block
+            for block in target.content
+            if not (
+                isinstance(block, dict)
+                and block.get("type") in {"image", "audio", "video"}
+            )
+        ]
+        return msg
+
+    # ------------------------------------------------------------------
+    # Override _acting / _reasoning for detailed terminal logging
+    # ------------------------------------------------------------------
+
+    async def _reasoning(self, tool_choice=None) -> Msg:
+        """Override to log LLM reasoning output to terminal."""
+        msg = await super()._reasoning(tool_choice=tool_choice)
+
+        text_parts = []
+        tool_calls = []
+        if isinstance(msg.content, list):
+            for block in msg.content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        tool_calls.append(block)
+
+        if text_parts:
+            text = "".join(text_parts).strip()
+            if text:
+                logger.info("LLM reasoning:\n%s", text)
+
+        for tc in tool_calls:
+            args_str = json.dumps(
+                tc.get("input", {}), ensure_ascii=False, indent=2,
+            )
+            logger.info(
+                "Tool call: %s(%s)",
+                tc.get("name", "?"),
+                args_str,
+            )
+
+        return msg
+
+    async def _acting(self, tool_call) -> dict | None:
+        """Override to log tool inputs and outputs to terminal."""
+        name = tool_call.get("name", "unknown")
+        args = tool_call.get("input", {})
+        args_str = json.dumps(args, ensure_ascii=False, indent=2)
+
+        logger.info(">>> Tool call: %s\n%s", name, args_str)
+        t0 = time.monotonic()
+
+        result = await super()._acting(tool_call)
+
+        elapsed = time.monotonic() - t0
+
+        # Extract the tool result text from memory (last entry added by super)
+        output_summary = self._summarize_tool_output(name)
+        logger.info(
+            "<<< Tool result: %s (%.1fs)\n%s",
+            name,
+            elapsed,
+            output_summary,
+        )
+        return result
+
+    def _summarize_tool_output(self, tool_name: str) -> str:
+        """Extract a loggable summary of the last tool result from memory."""
+        entries = getattr(self.memory, "content", None)
+        if not entries:
+            return "(no output captured)"
+
+        for entry in reversed(entries):
+            msg = entry[0] if isinstance(entry, tuple) else entry
+            if not isinstance(msg, Msg) or not isinstance(msg.content, list):
+                continue
+            for block in msg.content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                if block.get("name") != tool_name:
+                    continue
+                output = block.get("output", [])
+                if not isinstance(output, list):
+                    return str(output)[:2000]
+                parts: list[str] = []
+                for ob in output:
+                    if not isinstance(ob, dict):
+                        parts.append(str(ob)[:500])
+                        continue
+                    if ob.get("type") == "text":
+                        text = ob.get("text", "")
+                        if len(text) > 1000:
+                            text = text[:997] + "..."
+                        parts.append(text)
+                    elif ob.get("type") == "image":
+                        src = ob.get("source", {})
+                        if isinstance(src, dict) and src.get("url"):
+                            parts.append(f"[Image: {src['url'][:200]}]")
+                        elif isinstance(src, dict) and src.get("type") == "base64":
+                            parts.append("[Image: base64 data]")
+                        else:
+                            parts.append("[Image]")
+                    else:
+                        parts.append(f"[{ob.get('type', '?')}]")
+                return "\n".join(parts) if parts else "(empty output)"
+        return "(tool result not found in memory)"
+
     async def _reply_with_runtime_model(
         self,
         runtime_model,
         msg: Msg | list[Msg] | None,
         structured_model: Type[BaseModel] | None,
         persist_to_memory: bool = True,
+        suppress_output: bool = False,
+        disable_tools: bool = False,
     ) -> Msg:
         original_model = self.model
         old_memory_chat_model = None
         original_memory_len = len(self.memory.content)
+        original_toolkit = self.toolkit
+        original_print = self.print
         if self.memory_manager is not None:
             old_memory_chat_model = self.memory_manager.chat_model
 
         self.model = runtime_model
+        if disable_tools:
+            self.toolkit = Toolkit()
+        if suppress_output:
+            async def _silent_print(*_args, **_kwargs):
+                return None
+            self.print = _silent_print
         if self.memory_manager is not None:
             self.memory_manager.chat_model = runtime_model
         try:
@@ -591,5 +817,7 @@ class CoPawAgent(ReActAgent):
             if not persist_to_memory and len(self.memory.content) > original_memory_len:
                 self.memory.content = self.memory.content[:original_memory_len]
             self.model = original_model
+            self.toolkit = original_toolkit
+            self.print = original_print
             if self.memory_manager is not None:
                 self.memory_manager.chat_model = old_memory_chat_model

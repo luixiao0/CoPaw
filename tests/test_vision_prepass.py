@@ -5,50 +5,56 @@ from copaw.agents.vision_prepass import (
 )
 
 
-def test_build_prompt_contains_json_contract() -> None:
+def test_build_prompt_is_free_form() -> None:
     prompt = build_vlm_prepass_prompt("read the chart", 2)
-    assert "return ONLY valid JSON" in prompt
-    assert '"ocr_text": ["..."]' in prompt
-    assert "Selected image count: 2" in prompt
+    assert "Describe" in prompt
+    assert "Number of images: 2" in prompt
+    assert "read the chart" in prompt
 
 
-def test_normalize_vlm_output_from_json() -> None:
-    raw = (
-        '{"ocr_text":["abc"],"key_entities":["cat"],'
-        '"spatial_layout_cues":["top-left"],"ambiguities":["blur"],'
-        '"follow_up_checks":["zoom"],"confidence":"high"}'
-    )
-    normalized = normalize_vlm_prepass_output(raw)
-    assert '"ocr_text": ["abc"]' in normalized
-    assert '"confidence": "high"' in normalized
+def test_build_prompt_single_image_no_count() -> None:
+    prompt = build_vlm_prepass_prompt("describe it", 1)
+    assert "Number of images" not in prompt
 
 
-def test_normalize_vlm_output_from_fenced_json() -> None:
-    raw = "```json\n{\"ocr_text\":[\"x\"],\"confidence\":\"certain\"}\n```"
-    normalized = normalize_vlm_prepass_output(raw)
-    assert '"ocr_text": ["x"]' in normalized
-    assert '"confidence": "high"' in normalized
+def test_normalize_vlm_output_passthrough() -> None:
+    desc = "A cat on a keyboard. Text visible: Hello World."
+    normalized = normalize_vlm_prepass_output(desc)
+    assert normalized == desc
 
 
-def test_normalize_vlm_output_fallback_from_plain_text() -> None:
-    raw = "I can see two tables and one blue button."
-    normalized = normalize_vlm_prepass_output(raw)
-    assert '"confidence": "medium"' in normalized
-    assert '"ocr_text": []' in normalized
+def test_normalize_vlm_output_trims_long() -> None:
+    long_text = "x" * 600
+    normalized = normalize_vlm_prepass_output(long_text)
+    assert len(normalized) <= 500
+    assert normalized.endswith("...")
+
+
+def test_normalize_vlm_output_empty() -> None:
+    assert normalize_vlm_prepass_output("") == ""
+    assert normalize_vlm_prepass_output("   ") == ""
 
 
 def test_format_vlm_prepass_context_readable() -> None:
-    normalized = normalize_vlm_prepass_output(
-        '{"ocr_text":["Total: 42"],"key_entities":["invoice"],"confidence":"high"}',
-    )
+    desc = "An invoice showing Total: 42 with a company logo."
     readable = format_vlm_prepass_context(
         "image",
-        normalized,
+        desc,
         user_text="check this invoice",
     )
     assert "[Image]" in readable
     assert "User text:" in readable
-    assert "OCR:" in readable
-    assert "Key entities:" in readable
-    assert "Confidence: high" in readable
+    assert "Description:" in readable
+    assert "invoice" in readable
 
+
+def test_format_vlm_prepass_context_audio() -> None:
+    desc = "A person saying hello world."
+    readable = format_vlm_prepass_context("audio", desc)
+    assert "[Audio]" in readable
+    assert "Transcript:" in readable
+
+
+def test_format_vlm_prepass_context_empty() -> None:
+    assert format_vlm_prepass_context("image", "") == ""
+    assert format_vlm_prepass_context("image", "   ") == ""

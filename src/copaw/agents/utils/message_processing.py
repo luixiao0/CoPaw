@@ -96,27 +96,6 @@ def _update_block_with_local_path(
     else:
         url = Path(local_path).as_uri()
         block["source"] = {"type": "url", "url": url}
-        # #region agent log
-        try:
-            _log_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "debug-ecbb34.log")
-            with open(_log_path, "a", encoding="utf-8") as _dbg:
-                _dbg.write(
-                    os.linesep
-                    + __import__("json").dumps(
-                        {
-                            "sessionId": "ecbb34",
-                            "hypothesisId": "H2",
-                            "location": "message_processing.py:_update_block_with_local_path",
-                            "message": "url set on block",
-                            "data": {"block_type": block_type, "url": url, "url_has_image_ext": url.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))},
-                            "timestamp": __import__("time").time_ns() // 1_000_000,
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-        except Exception:
-            pass
-        # #endregion
     return block
 
 

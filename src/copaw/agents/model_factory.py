@@ -17,6 +17,26 @@ from agentscope.formatter import FormatterBase, OpenAIChatFormatter
 from agentscope.model import ChatModelBase, OpenAIChatModel
 
 from .utils.tool_message_utils import _sanitize_tool_messages
+
+
+def _normalize_image_blocks(msgs) -> None:
+    """Replace image blocks with missing/empty url so the API never receives url=None.
+
+    Message content is mutated in place. Any block with type 'image', source type 'url',
+    and url None or empty is replaced with a text placeholder to avoid OpenAI 400.
+    """
+    for msg in msgs or []:
+        if not hasattr(msg, "content") or not isinstance(msg.content, list):
+            continue
+        for i, block in enumerate(msg.content):
+            if not isinstance(block, dict) or block.get("type") != "image":
+                continue
+            source = block.get("source")
+            if not isinstance(source, dict):
+                continue
+            if source.get("type") == "url" and not source.get("url"):
+                msg.content[i] = {"type": "text", "text": "[Image: URL missing]"}
+                logger.debug("Replaced image block with missing url by text placeholder")
 from ..local_models import create_local_chat_model
 from ..providers import (
     get_active_llm_config,
@@ -73,12 +93,13 @@ def _create_file_block_support_formatter(
         """Formatter with file block support for tool results."""
 
         async def _format(self, msgs):
-            """Override to sanitize tool messages before formatting.
+            """Override to sanitize tool messages and normalize image blocks before formatting.
 
             This prevents OpenAI API errors from improperly paired
-            tool messages.
+            tool messages and from image_url.url being None.
             """
             msgs = _sanitize_tool_messages(msgs)
+            _normalize_image_blocks(msgs)
             return await super()._format(msgs)
 
         @staticmethod

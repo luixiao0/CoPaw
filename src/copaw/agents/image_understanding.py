@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
-"""Media understanding prepass runner used by CoPawAgent."""
+"""Media understanding prepass runner used by CoPawAgent.
+
+Key improvements over initial version (OpenClaw-aligned):
+- Converts file:// URL image blocks to inline base64 before VLM call
+- Compresses large images to stay within API size limits
+- Uses free-form description prompt instead of rigid JSON
+"""
 
 from __future__ import annotations
 
-import json
+import base64
+import io
+import logging
+import mimetypes
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from agentscope.message import Msg, TextBlock
 
@@ -13,8 +25,14 @@ from .model_fallback import run_with_vlm_fallback
 from .vision_prepass import build_vlm_prepass_prompt, normalize_vlm_prepass_output
 from ..providers import ResolvedModelConfig
 
+logger = logging.getLogger(__name__)
+
 DecisionOutcome = Literal["success", "failed", "skipped", "disabled"]
 MediaCapability = Literal["image", "audio", "video"]
+
+_IMAGE_MAX_SIDE = 2000
+_IMAGE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+_IMAGE_QUALITY_STEPS = [85, 70, 50]
 
 
 @dataclass
@@ -82,6 +100,174 @@ def select_media_blocks_for_prepass(
     return media_blocks[:max_items]
 
 
+def _read_file_url(url: str) -> bytes | None:
+    """Read a file:// URL or local path and return raw bytes.
+
+    Handles both proper ``file:///C:/path`` and malformed ``file://C:\\path``
+    variants common on Windows.
+    """
+    import re
+
+    parsed = urlparse(url)
+    local_path: Path | None = None
+
+    if parsed.scheme == "file":
+        try:
+            local_path = Path(url2pathname(parsed.path))
+        except Exception:
+            pass
+
+        if local_path is not None and not local_path.is_absolute():
+            # Malformed Windows URL like file://C:\... gets parsed with
+            # netloc='C:' and relative path.  Reconstruct from netloc+path.
+            combined = (parsed.netloc or "") + (parsed.path or "")
+            try:
+                local_path = Path(url2pathname(combined))
+            except Exception:
+                pass
+
+        if local_path is None or not local_path.is_absolute():
+            # Last resort: strip the file:// prefix and use raw path
+            raw = re.sub(r"^file:/{0,3}", "", url)
+            local_path = Path(raw)
+
+    elif parsed.scheme == "" and parsed.netloc == "":
+        local_path = Path(url)
+    else:
+        return None
+
+    try:
+        return local_path.read_bytes()
+    except Exception:
+        logger.debug("Failed to read local file for base64 conversion: %s", url)
+        return None
+
+
+def _guess_mime(url: str, data: bytes) -> str:
+    """Best-effort MIME type for an image."""
+    mime, _ = mimetypes.guess_type(url)
+    if mime and mime.startswith("image/"):
+        return mime
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"GIF8":
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
+def _compress_image(
+    data: bytes,
+    mime: str,
+    *,
+    max_side: int = _IMAGE_MAX_SIDE,
+    max_bytes: int = _IMAGE_MAX_BYTES,
+) -> tuple[bytes, str]:
+    """Resize / re-encode an image to fit within size limits.
+
+    Returns (compressed_bytes, mime_type).  Falls back to original data
+    if Pillow is not available or compression fails.
+    """
+    if len(data) <= max_bytes:
+        return data, mime
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.debug("Pillow not installed; skipping image compression")
+        return data, mime
+    try:
+        img = Image.open(io.BytesIO(data))
+        w, h = img.size
+        if max(w, h) > max_side:
+            ratio = max_side / max(w, h)
+            img = img.resize(
+                (int(w * ratio), int(h * ratio)),
+                Image.LANCZOS,
+            )
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        for quality in _IMAGE_QUALITY_STEPS:
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality)
+            out = buf.getvalue()
+            if len(out) <= max_bytes:
+                return out, "image/jpeg"
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=_IMAGE_QUALITY_STEPS[-1])
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        logger.debug("Image compression failed; using original data")
+        return data, mime
+
+
+def _resolve_image_blocks_to_base64(blocks: list[dict]) -> list[dict]:
+    """Convert file:// URL image blocks to inline base64 source blocks.
+
+    This is the critical fix: many VLM APIs cannot read file:// URLs.
+    We read the file, optionally compress it, and embed as an AgentScope-
+    native ``{"type": "base64", "media_type": ..., "data": ...}`` source.
+    """
+    resolved: list[dict] = []
+    for block in blocks:
+        source = block.get("source", {})
+        if not isinstance(source, dict):
+            resolved.append(block)
+            continue
+
+        if source.get("type") == "base64" and source.get("data"):
+            raw_b64 = source["data"]
+            raw_data = base64.b64decode(raw_b64)
+            mime = source.get("media_type") or _guess_mime("", raw_data)
+            data, final_mime = _compress_image(raw_data, mime)
+            if data is raw_data:
+                resolved.append(block)
+            else:
+                b64 = base64.b64encode(data).decode("ascii")
+                resolved.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": final_mime, "data": b64},
+                })
+            continue
+
+        url = ""
+        if source.get("type") == "url":
+            url = source.get("url", "")
+
+        if not url:
+            resolved.append(block)
+            continue
+
+        parsed = urlparse(url)
+        is_local = parsed.scheme in ("file", "") or (
+            parsed.scheme == "" and parsed.netloc == ""
+        )
+        if not is_local:
+            resolved.append(block)
+            continue
+
+        raw_data = _read_file_url(url)
+        if raw_data is None:
+            resolved.append(block)
+            continue
+
+        mime = _guess_mime(url, raw_data)
+        data, final_mime = _compress_image(raw_data, mime)
+        b64 = base64.b64encode(data).decode("ascii")
+        resolved.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": final_mime, "data": b64},
+        })
+        logger.debug(
+            "Converted file:// image to base64 (%d bytes -> %d bytes)",
+            len(raw_data),
+            len(data),
+        )
+    return resolved
+
+
 def build_prepass_message(
     source: Msg,
     media_blocks: list[dict],
@@ -95,6 +281,8 @@ def build_prepass_message(
         if prompt_override and prompt_override.strip()
         else _build_prompt_by_capability(capability, user_text, len(media_blocks))
     )
+    if capability == "image":
+        media_blocks = _resolve_image_blocks_to_base64(media_blocks)
     content = [TextBlock(type="text", text=prompt), *media_blocks]
     return Msg(name=source.name, role="user", content=content)
 
@@ -111,53 +299,25 @@ def _build_prompt_by_capability(
         )
     if capability == "audio":
         return (
-            "You are an audio preprocessor for a stronger text-only planner.\n"
-            "Analyze provided audio blocks and return ONLY valid JSON.\n"
-            "Do NOT answer the user directly.\n\n"
-            "Required JSON schema:\n"
-            "{\n"
-            '  "ocr_text": ["..."],\n'
-            '  "key_entities": ["..."],\n'
-            '  "spatial_layout_cues": ["..."],\n'
-            '  "ambiguities": ["..."],\n'
-            '  "follow_up_checks": ["..."],\n'
-            '  "confidence": "low|medium|high"\n'
-            "}\n\n"
-            f"Selected audio count: {selected_count}\n"
-            f"User task:\n{user_text}"
+            "You are an audio preprocessor. "
+            "Transcribe and describe the provided audio concisely.\n"
+            "Do NOT answer the user directly — only describe what you hear.\n"
+            f"Number of audio clips: {selected_count}\n"
+            f"User's task context: {user_text}"
         )
     return (
-        "You are a video preprocessor for a stronger text-only planner.\n"
-        "Analyze provided video blocks and return ONLY valid JSON.\n"
-        "Do NOT answer the user directly.\n\n"
-        "Required JSON schema:\n"
-        "{\n"
-        '  "ocr_text": ["..."],\n'
-        '  "key_entities": ["..."],\n'
-        '  "spatial_layout_cues": ["..."],\n'
-        '  "ambiguities": ["..."],\n'
-        '  "follow_up_checks": ["..."],\n'
-        '  "confidence": "low|medium|high"\n'
-        "}\n\n"
-        f"Selected video count: {selected_count}\n"
-        f"User task:\n{user_text}"
+        "You are a video preprocessor. "
+        "Describe the provided video concisely and accurately.\n"
+        "Do NOT answer the user directly — only describe what you see and hear.\n"
+        f"Number of videos: {selected_count}\n"
+        f"User's task context: {user_text}"
     )
 
 
 def _cap_output_size(analysis: str, max_output_chars: int) -> str:
     if max_output_chars <= 0 or len(analysis) <= max_output_chars:
         return analysis
-    compact = {
-        "ocr_text": [],
-        "key_entities": [],
-        "spatial_layout_cues": [],
-        "ambiguities": [
-            "Vision prepass output exceeded max_output_chars and was compacted.",
-        ],
-        "follow_up_checks": [],
-        "confidence": "low",
-    }
-    return json.dumps(compact, ensure_ascii=False)
+    return analysis[:max_output_chars - 3] + "..."
 
 
 async def run_media_understanding_prepass(

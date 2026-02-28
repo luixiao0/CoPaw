@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg, TextBlock
@@ -54,7 +52,7 @@ async def test_run_image_understanding_prepass_uses_fallback() -> None:
     async def _run_with_runtime_model(runtime_model, _msg, _timeout) -> str:
         if runtime_model == "primary":
             raise RuntimeError("primary failed")
-        return json.dumps({"ocr_text": ["ok"], "confidence": "high"})
+        return "The image shows a cat sitting on a desk."
 
     result = await run_media_understanding_prepass(
         msg=msg,
@@ -74,7 +72,7 @@ async def test_run_image_understanding_prepass_uses_fallback() -> None:
     assert result.used is not None
     assert result.used.provider_id == "p2"
     assert result.decision.selected_item_count == 2
-    assert '"ocr_text": ["ok"]' in (result.analysis or "")
+    assert "cat" in (result.analysis or "")
 
 
 @pytest.mark.asyncio
@@ -102,7 +100,7 @@ async def test_run_image_understanding_prepass_disabled() -> None:
 @pytest.mark.asyncio
 async def test_run_audio_video_understanding_prepass_success() -> None:
     async def _runtime_ok(_runtime_model, _msg, _timeout):
-        return json.dumps({"ocr_text": ["ok"], "confidence": "medium"})
+        return "Audio/video content transcribed successfully."
 
     cfg = ResolvedModelConfig(provider_id="p1", model="m1")
     audio_result = await run_media_understanding_prepass(
@@ -158,15 +156,20 @@ async def test_reply_entry_runs_prepass_and_injects(monkeypatch: pytest.MonkeyPa
     agent._instance_pre_reply_hooks = {}
     agent._instance_post_reply_hooks = {}
 
+    class _FakeMemory:
+        content = []
+    object.__setattr__(agent, "memory", _FakeMemory())
+
     async def _noop_process(_msg):
         return None
 
     async def _fake_runtime(_runtime_model, _msg, _timeout):
-        return json.dumps({"ocr_text": ["text"], "confidence": "high"})
+        return "A document with text visible."
 
     async def _fake_super_reply(self, msg=None, structured_model=None):  # noqa: ARG001
         assert isinstance(msg, Msg)
-        assert "[VisionPrepass]" in msg.get_text_content()
+        text = msg.get_text_content()
+        assert "[Image]" in text or "Description" in text
         return msg
 
     import copaw.agents.react_agent as react_agent_module
@@ -183,7 +186,8 @@ async def test_reply_entry_runs_prepass_and_injects(monkeypatch: pytest.MonkeyPa
 
     out = await agent.reply(msg=_msg_with_images(1))
     assert isinstance(out, Msg)
-    assert "[VisionPrepass]" in out.get_text_content()
+    text = out.get_text_content()
+    assert "[Image]" in text or "Description" in text
 
 
 def test_reply_injects_failure_on_non_success() -> None:

@@ -106,8 +106,8 @@ class VisionImageSettings(BaseModel):
         description="Timeout in seconds for each VLM prepass attempt.",
     )
     max_output_chars: int = Field(
-        default=4000,
-        ge=200,
+        default=500,
+        ge=100,
         le=20000,
         description="Maximum normalized prepass output size kept for LLM context.",
     )
