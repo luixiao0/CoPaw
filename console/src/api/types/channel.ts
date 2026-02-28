@@ -1,6 +1,7 @@
 export interface BaseChannelConfig {
   enabled: boolean;
   bot_prefix: string;
+  show_tool_details?: boolean;
 }
 
 export interface IMessageChannelConfig extends BaseChannelConfig {

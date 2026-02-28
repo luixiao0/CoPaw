@@ -23,27 +23,6 @@ from ...constant import WORKING_DIR
 logger = logging.getLogger(__name__)
 
 
-def _compact_tool_blocks_in_content(content):
-    """Replace tool_use and tool_result blocks with short text for compact display."""
-    if not isinstance(content, list):
-        return content
-    out = []
-    for block in content:
-        if not isinstance(block, dict):
-            out.append(block)
-            continue
-        btype = block.get("type")
-        if btype == "tool_use":
-            name = block.get("name", "tool")
-            out.append({"type": "text", "text": f"🔧 **{name}** …"})
-        elif btype == "tool_result":
-            name = block.get("name", "tool")
-            out.append({"type": "text", "text": f"✅ **{name}**"})
-        else:
-            out.append(block)
-    return out
-
-
 class AgentRunner(Runner):
     def __init__(self) -> None:
         super().__init__()
@@ -159,11 +138,17 @@ class AgentRunner(Runner):
             # in the session state.
             agent.rebuild_sys_prompt()
 
-            # Verbosity: from request meta (e.g. Web UI display.verbosity) or config
+            # Verbosity: from request meta (e.g. Web UI display.verbosity), channel config, or global config
             meta = getattr(request, "meta", None) or getattr(
                 request, "channel_meta", None
             ) or {}
             show_tool_details = meta.get("show_tool_details")
+            if show_tool_details is None:
+                channel_name = getattr(request, "channel", None)
+                if channel_name and hasattr(config.channels, channel_name):
+                    channel_cfg = getattr(config.channels, channel_name, None)
+                    if channel_cfg:
+                        show_tool_details = getattr(channel_cfg, "show_tool_details", None)
             if show_tool_details is None and hasattr(config, "show_tool_details"):
                 show_tool_details = config.show_tool_details
             if show_tool_details is None:
@@ -174,10 +159,14 @@ class AgentRunner(Runner):
                 coroutine_task=agent(msgs),
             ):
                 if not show_tool_details and getattr(msg, "content", None):
-                    compact_content = _compact_tool_blocks_in_content(msg.content)
-                    if compact_content is not msg.content:
-                        msg = copy.copy(msg)
-                        msg.content = compact_content
+                    content = msg.content
+                    if isinstance(content, list):
+                        has_non_tool = any(
+                            isinstance(b, dict) and b.get("type") not in ("tool_use", "tool_result")
+                            for b in content
+                        )
+                        if not has_non_tool:
+                            continue
                 yield msg, last
 
         except asyncio.CancelledError:

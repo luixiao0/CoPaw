@@ -5,6 +5,8 @@
 
 import asyncio
 import locale
+import platform
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -12,6 +14,20 @@ from agentscope.tool import ToolResponse
 from agentscope.message import TextBlock
 
 from copaw.constant import WORKING_DIR
+
+PLATFORM_HINTS = {
+    "Windows": " On Windows, use `dir` instead of `ls`, `type` instead of `cat`, `del` instead of `rm`, `md` instead of `mkdir`, etc.",
+    "Linux": "",
+    "Darwin": "",
+}
+
+
+def _format_error_msg(error_text: str, returncode: int) -> str:
+    """Add platform hint only when command fails due to unknown command."""
+    hint = ""
+    if returncode != 0 and "not recognized" in error_text.lower():
+        hint = PLATFORM_HINTS.get(platform.system(), "")
+    return error_text + hint
 
 
 # pylint: disable=too-many-branches
@@ -112,7 +128,7 @@ async def execute_shell_command(
                 response_parts.append(f"\n[stdout]\n{stdout_str}")
             if stderr_str:
                 response_parts.append(f"\n[stderr]\n{stderr_str}")
-            response_text = "".join(response_parts)
+            response_text = _format_error_msg("".join(response_parts), returncode)
 
         return ToolResponse(
             content=[

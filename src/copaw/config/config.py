@@ -14,6 +14,7 @@ class BaseChannelConfig(BaseModel):
 
     enabled: bool = False
     bot_prefix: str = ""
+    show_tool_details: Optional[bool] = None
 
 
 class IMessageChannelConfig(BaseChannelConfig):
@@ -58,6 +59,7 @@ class TelegramConfig(BaseChannelConfig):
     bot_token: str = ""
     http_proxy: str = ""
     http_proxy_auth: str = ""
+    show_tool_details: Optional[bool] = None
 
 
 class ConsoleConfig(BaseChannelConfig):

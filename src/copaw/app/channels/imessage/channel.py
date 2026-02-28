@@ -77,6 +77,9 @@ class IMessageChannel(BaseChannel):
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
     ) -> "IMessageChannel":
+        channel_show_tool_details = getattr(config, "show_tool_details", None)
+        if channel_show_tool_details is not None:
+            show_tool_details = channel_show_tool_details
         return cls(
             process=process,
             enabled=config.enabled,

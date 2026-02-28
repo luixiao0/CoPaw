@@ -312,7 +312,14 @@ class TelegramChannel(BaseChannel):
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
     ) -> "TelegramChannel":
-        # Support dict from API/extra (e.g. config.json raw or channel update body)
+        channel_show_tool_details = None
+        if isinstance(config, dict):
+            channel_show_tool_details = config.get("show_tool_details")
+        else:
+            channel_show_tool_details = getattr(config, "show_tool_details", None)
+        if channel_show_tool_details is not None:
+            show_tool_details = channel_show_tool_details
+
         if isinstance(config, dict):
             return cls(
                 process=process,

@@ -49,6 +49,10 @@ def _fmt_tool_call(
     args_preview: str,
     style: RenderStyle,
 ) -> str:
+    if not style.show_tool_details:
+        if style.use_emoji:
+            return f"🔧 **{name}** …"
+        return f"**{name}** …"
     if style.supports_markdown and style.use_emoji:
         return f"🔧 **{name}**\n```\n{args_preview}\n```"
     if style.supports_markdown:
@@ -59,6 +63,10 @@ def _fmt_tool_call(
 
 
 def _fmt_tool_output_label(name: str, style: RenderStyle) -> str:
+    if not style.show_tool_details:
+        if style.use_emoji:
+            return f"✅ **{name}**"
+        return f"**{name}**"
     if style.use_emoji:
         return f"✅ **{name}**:"
     if style.supports_markdown:

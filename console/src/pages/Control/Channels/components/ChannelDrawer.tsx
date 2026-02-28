@@ -188,6 +188,15 @@ export function ChannelDrawer({
             <Input placeholder="@bot" />
           </Form.Item>
 
+          <Form.Item
+            name="show_tool_details"
+            label="Show Tool Details"
+            tooltip="Show detailed tool call/output in messages. When disabled, shows '...' instead."
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+
           {renderExtraFields(activeKey)}
 
           <Form.Item>

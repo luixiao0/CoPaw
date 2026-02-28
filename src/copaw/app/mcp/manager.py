@@ -90,13 +90,14 @@ class MCPClientManager:
                 await self._add_client(key, client_config)
                 logger.debug(f"MCP client '{key}' initialized successfully")
             except Exception as e:
+                import traceback
                 logger.warning(
                     "Failed to initialize MCP client '%s': %s. "
                     "Check that the command is installed (e.g. npx for Node-based servers) and any required env/API keys are set.",
                     key,
                     e,
                 )
-                logger.debug("MCP client init failure", exc_info=True)
+                logger.debug("MCP client init failure: %s", traceback.format_exc())
 
     async def get_clients(self) -> List[Any]:
         """Get list of all active MCP clients.
