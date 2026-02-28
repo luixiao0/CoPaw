@@ -29,6 +29,7 @@ from .crons.manager import CronManager
 from .runner.manager import ChatManager
 from .routers import router as api_router
 from ..envs import load_envs_into_environ
+from ..providers import load_providers_json
 
 # Apply log level on load so reload child process gets same level as CLI.
 logger = setup_logger(os.environ.get(LOG_LEVEL_ENV, "info"))
@@ -49,6 +50,12 @@ agent_app = AgentApp(
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # pylint: disable=too-many-statements
     await runner.start()
+
+    # Warm providers cache at startup so custom model discovery runs early.
+    try:
+        load_providers_json()
+    except Exception:
+        logger.exception("Failed to load providers on startup")
 
     # --- MCP client manager init (independent module, hot-reloadable) ---
     config = load_config()

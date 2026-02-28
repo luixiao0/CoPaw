@@ -4,6 +4,7 @@ import type {
   ProviderConfigRequest,
   ActiveModelsInfo,
   ModelSlotRequest,
+  VlmFallbacksRequest,
   CreateCustomProviderRequest,
   AddModelRequest,
 } from "../types";
@@ -21,6 +22,18 @@ export const providerApi = {
 
   setActiveLlm: (body: ModelSlotRequest) =>
     request<ActiveModelsInfo>("/models/active", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  setActiveVlm: (body: ModelSlotRequest) =>
+    request<ActiveModelsInfo>("/models/active/vlm", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  setActiveVlmFallbacks: (body: VlmFallbacksRequest) =>
+    request<ActiveModelsInfo>("/models/active/vlm/fallbacks", {
       method: "PUT",
       body: JSON.stringify(body),
     }),

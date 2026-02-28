@@ -84,6 +84,8 @@ class ProvidersData(BaseModel):
         default_factory=dict,
     )
     active_llm: ModelSlotConfig = Field(default_factory=ModelSlotConfig)
+    active_vlm: ModelSlotConfig = Field(default_factory=ModelSlotConfig)
+    active_vlm_fallbacks: List[ModelSlotConfig] = Field(default_factory=list)
 
     def get_credentials(self, provider_id: str) -> tuple[str, str]:
         """Return ``(base_url, api_key)`` for *provider_id*."""
@@ -130,9 +132,12 @@ class ProviderInfo(BaseModel):
 
 class ActiveModelsInfo(BaseModel):
     active_llm: ModelSlotConfig
+    active_vlm: ModelSlotConfig = Field(default_factory=ModelSlotConfig)
+    active_vlm_fallbacks: List[ModelSlotConfig] = Field(default_factory=list)
 
 
 class ResolvedModelConfig(BaseModel):
+    provider_id: str = Field(default="")
     model: str = Field(default="")
     base_url: str = Field(default="")
     api_key: str = Field(default="")

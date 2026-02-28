@@ -30,11 +30,17 @@ export interface ModelSlotConfig {
 
 export interface ActiveModelsInfo {
   active_llm: ModelSlotConfig;
+  active_vlm: ModelSlotConfig;
+  active_vlm_fallbacks: ModelSlotConfig[];
 }
 
 export interface ModelSlotRequest {
   provider_id: string;
   model: string;
+}
+
+export interface VlmFallbacksRequest {
+  fallbacks: ModelSlotRequest[];
 }
 
 /* ---- Custom provider CRUD ---- */
@@ -44,6 +50,7 @@ export interface CreateCustomProviderRequest {
   name: string;
   default_base_url?: string;
   api_key_prefix?: string;
+  api_key?: string;
   models?: ModelInfo[];
 }
 

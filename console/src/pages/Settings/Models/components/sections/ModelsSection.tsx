@@ -22,6 +22,10 @@ interface ModelsSectionProps {
       provider_id?: string;
       model?: string;
     };
+    active_vlm?: {
+      provider_id?: string;
+      model?: string;
+    };
   } | null;
   onSaved: () => void;
 }
@@ -32,16 +36,25 @@ export function ModelsSection({
   onSaved,
 }: ModelsSectionProps) {
   const { t } = useTranslation();
-  const [saving, setSaving] = useState(false);
-  const [selectedProviderId, setSelectedProviderId] = useState<
+  const [savingLlm, setSavingLlm] = useState(false);
+  const [savingVlm, setSavingVlm] = useState(false);
+  const [selectedLlmProviderId, setSelectedLlmProviderId] = useState<
     string | undefined
   >(undefined);
-  const [selectedModel, setSelectedModel] = useState<string | undefined>(
+  const [selectedLlmModel, setSelectedLlmModel] = useState<string | undefined>(
     undefined,
   );
-  const [dirty, setDirty] = useState(false);
+  const [selectedVlmProviderId, setSelectedVlmProviderId] = useState<
+    string | undefined
+  >(undefined);
+  const [selectedVlmModel, setSelectedVlmModel] = useState<string | undefined>(
+    undefined,
+  );
+  const [llmDirty, setLlmDirty] = useState(false);
+  const [vlmDirty, setVlmDirty] = useState(false);
 
-  const currentSlot = activeModels?.active_llm;
+  const currentLlmSlot = activeModels?.active_llm;
+  const currentVlmSlot = activeModels?.active_vlm;
 
   const eligible = useMemo(
     () =>
@@ -53,124 +66,246 @@ export function ModelsSection({
   );
 
   useEffect(() => {
-    if (currentSlot) {
-      setSelectedProviderId(currentSlot.provider_id || undefined);
-      setSelectedModel(currentSlot.model || undefined);
+    if (currentLlmSlot) {
+      setSelectedLlmProviderId(currentLlmSlot.provider_id || undefined);
+      setSelectedLlmModel(currentLlmSlot.model || undefined);
     }
-    setDirty(false);
-  }, [currentSlot?.provider_id, currentSlot?.model]);
+    setLlmDirty(false);
+  }, [currentLlmSlot?.provider_id, currentLlmSlot?.model]);
 
-  const chosenProvider = providers.find((p) => p.id === selectedProviderId);
-  const modelOptions = chosenProvider?.models ?? [];
-  const hasModels = modelOptions.length > 0;
+  useEffect(() => {
+    if (currentVlmSlot) {
+      setSelectedVlmProviderId(currentVlmSlot.provider_id || undefined);
+      setSelectedVlmModel(currentVlmSlot.model || undefined);
+    }
+    setVlmDirty(false);
+  }, [currentVlmSlot?.provider_id, currentVlmSlot?.model]);
 
-  const handleProviderChange = (pid: string) => {
-    setSelectedProviderId(pid);
-    setSelectedModel(undefined);
-    setDirty(true);
+  const llmProvider = providers.find((p) => p.id === selectedLlmProviderId);
+  const llmModelOptions = llmProvider?.models ?? [];
+  const hasLlmModels = llmModelOptions.length > 0;
+
+  const vlmProvider = providers.find((p) => p.id === selectedVlmProviderId);
+  const vlmModelOptions = vlmProvider?.models ?? [];
+  const hasVlmModels = vlmModelOptions.length > 0;
+
+  const handleLlmProviderChange = (pid: string) => {
+    setSelectedLlmProviderId(pid);
+    setSelectedLlmModel(undefined);
+    setLlmDirty(true);
   };
 
-  const handleModelChange = (model: string) => {
-    setSelectedModel(model);
-    setDirty(true);
+  const handleLlmModelChange = (model: string) => {
+    setSelectedLlmModel(model);
+    setLlmDirty(true);
   };
 
-  const handleSave = async () => {
-    if (!selectedProviderId || !selectedModel) return;
+  const handleVlmProviderChange = (pid: string) => {
+    setSelectedVlmProviderId(pid);
+    setSelectedVlmModel(undefined);
+    setVlmDirty(true);
+  };
+
+  const handleVlmModelChange = (model: string) => {
+    setSelectedVlmModel(model);
+    setVlmDirty(true);
+  };
+
+  const handleSaveLlm = async () => {
+    if (!selectedLlmProviderId || !selectedLlmModel) return;
 
     const body: ModelSlotRequest = {
-      provider_id: selectedProviderId,
-      model: selectedModel,
+      provider_id: selectedLlmProviderId,
+      model: selectedLlmModel,
     };
 
-    setSaving(true);
+    setSavingLlm(true);
     try {
       await api.setActiveLlm(body);
       message.success(t("models.llmModelUpdated"));
-      setDirty(false);
+      setLlmDirty(false);
       onSaved();
     } catch (error) {
       const errMsg =
         error instanceof Error ? error.message : t("models.failedToSave");
       message.error(errMsg);
     } finally {
-      setSaving(false);
+      setSavingLlm(false);
     }
   };
 
-  const isActive =
-    currentSlot &&
-    currentSlot.provider_id === selectedProviderId &&
-    currentSlot.model === selectedModel;
-  const canSave = dirty && !!selectedProviderId && !!selectedModel;
+  const handleSaveVlm = async () => {
+    if (!selectedVlmProviderId || !selectedVlmModel) return;
+
+    const body: ModelSlotRequest = {
+      provider_id: selectedVlmProviderId,
+      model: selectedVlmModel,
+    };
+
+    setSavingVlm(true);
+    try {
+      await api.setActiveVlm(body);
+      message.success("VLM model updated");
+      setVlmDirty(false);
+      onSaved();
+    } catch (error) {
+      const errMsg =
+        error instanceof Error ? error.message : t("models.failedToSave");
+      message.error(errMsg);
+    } finally {
+      setSavingVlm(false);
+    }
+  };
+
+  const llmActive =
+    currentLlmSlot &&
+    currentLlmSlot.provider_id === selectedLlmProviderId &&
+    currentLlmSlot.model === selectedLlmModel;
+  const canSaveLlm = llmDirty && !!selectedLlmProviderId && !!selectedLlmModel;
+
+  const vlmActive =
+    currentVlmSlot &&
+    currentVlmSlot.provider_id === selectedVlmProviderId &&
+    currentVlmSlot.model === selectedVlmModel;
+  const canSaveVlm = vlmDirty && !!selectedVlmProviderId && !!selectedVlmModel;
 
   return (
-    <div className={styles.slotSection}>
-      <div className={styles.slotHeader}>
-        <h3 className={styles.slotTitle}>{t("models.llmConfiguration")}</h3>
-        {currentSlot?.provider_id && currentSlot?.model && (
-          <span className={styles.slotCurrent}>
-            {t("models.active", {
-              provider: currentSlot.provider_id,
-              model: currentSlot.model,
-            })}
-          </span>
-        )}
-      </div>
-
-      <div className={styles.slotForm}>
-        <div className={styles.slotField}>
-          <label className={styles.slotLabel}>{t("models.provider")}</label>
-          <Select
-            style={{ width: "100%" }}
-            placeholder={t("models.selectProvider")}
-            value={selectedProviderId}
-            onChange={handleProviderChange}
-            options={eligible.map((p) => ({
-              value: p.id,
-              label: p.name,
-            }))}
-          />
+    <>
+      <div className={styles.slotSection}>
+        <div className={styles.slotHeader}>
+          <h3 className={styles.slotTitle}>{t("models.llmConfiguration")}</h3>
+          {currentLlmSlot?.provider_id && currentLlmSlot?.model && (
+            <span className={styles.slotCurrent}>
+              {t("models.active", {
+                provider: currentLlmSlot.provider_id,
+                model: currentLlmSlot.model,
+              })}
+            </span>
+          )}
         </div>
 
-        <div className={styles.slotField}>
-          <label className={styles.slotLabel}>{t("models.model")}</label>
-          <Select
-            style={{ width: "100%" }}
-            placeholder={
-              hasModels ? t("models.selectModel") : t("models.addModelFirst")
-            }
-            disabled={!hasModels}
-            showSearch
-            optionFilterProp="label"
-            value={selectedModel}
-            onChange={handleModelChange}
-            options={modelOptions.map((m) => ({
-              value: m.id,
-              label: `${m.name} (${m.id})`,
-            }))}
-          />
-        </div>
+        <div className={styles.slotForm}>
+          <div className={styles.slotField}>
+            <label className={styles.slotLabel}>{t("models.provider")}</label>
+            <Select
+              style={{ width: "100%" }}
+              placeholder={t("models.selectProvider")}
+              value={selectedLlmProviderId}
+              onChange={handleLlmProviderChange}
+              options={eligible.map((p) => ({
+                value: p.id,
+                label: p.name,
+              }))}
+            />
+          </div>
 
-        <div
-          className={styles.slotField}
-          style={{ flex: "0 0 auto", minWidth: "120px" }}
-        >
-          <label className={styles.slotLabel} style={{ visibility: "hidden" }}>
-            {t("models.actions")}
-          </label>
-          <Button
-            type="primary"
-            loading={saving}
-            disabled={!canSave}
-            onClick={handleSave}
-            block
-            icon={<SaveOutlined />}
+          <div className={styles.slotField}>
+            <label className={styles.slotLabel}>{t("models.model")}</label>
+            <Select
+              style={{ width: "100%" }}
+              placeholder={
+                hasLlmModels ? t("models.selectModel") : t("models.addModelFirst")
+              }
+              disabled={!hasLlmModels}
+              showSearch
+              optionFilterProp="label"
+              value={selectedLlmModel}
+              onChange={handleLlmModelChange}
+              options={llmModelOptions.map((m) => ({
+                value: m.id,
+                label: `${m.name} (${m.id})`,
+              }))}
+            />
+          </div>
+
+          <div
+            className={styles.slotField}
+            style={{ flex: "0 0 auto", minWidth: "120px" }}
           >
-            {isActive ? t("models.saved") : t("models.save")}
-          </Button>
+            <label className={styles.slotLabel} style={{ visibility: "hidden" }}>
+              {t("models.actions")}
+            </label>
+            <Button
+              type="primary"
+              loading={savingLlm}
+              disabled={!canSaveLlm}
+              onClick={handleSaveLlm}
+              block
+              icon={<SaveOutlined />}
+            >
+              {llmActive ? t("models.saved") : t("models.save")}
+            </Button>
+          </div>
         </div>
       </div>
-    </div>
+
+      <div className={styles.slotSection}>
+        <div className={styles.slotHeader}>
+          <h3 className={styles.slotTitle}>VLM Configuration</h3>
+          {currentVlmSlot?.provider_id && currentVlmSlot?.model && (
+            <span className={styles.slotCurrent}>
+              {t("models.active", {
+                provider: currentVlmSlot.provider_id,
+                model: currentVlmSlot.model,
+              })}
+            </span>
+          )}
+        </div>
+
+        <div className={styles.slotForm}>
+          <div className={styles.slotField}>
+            <label className={styles.slotLabel}>{t("models.provider")}</label>
+            <Select
+              style={{ width: "100%" }}
+              placeholder={t("models.selectProvider")}
+              value={selectedVlmProviderId}
+              onChange={handleVlmProviderChange}
+              options={eligible.map((p) => ({
+                value: p.id,
+                label: p.name,
+              }))}
+            />
+          </div>
+
+          <div className={styles.slotField}>
+            <label className={styles.slotLabel}>{t("models.model")}</label>
+            <Select
+              style={{ width: "100%" }}
+              placeholder={
+                hasVlmModels ? t("models.selectModel") : t("models.addModelFirst")
+              }
+              disabled={!hasVlmModels}
+              showSearch
+              optionFilterProp="label"
+              value={selectedVlmModel}
+              onChange={handleVlmModelChange}
+              options={vlmModelOptions.map((m) => ({
+                value: m.id,
+                label: `${m.name} (${m.id})`,
+              }))}
+            />
+          </div>
+
+          <div
+            className={styles.slotField}
+            style={{ flex: "0 0 auto", minWidth: "120px" }}
+          >
+            <label className={styles.slotLabel} style={{ visibility: "hidden" }}>
+              {t("models.actions")}
+            </label>
+            <Button
+              type="primary"
+              loading={savingVlm}
+              disabled={!canSaveVlm}
+              onClick={handleSaveVlm}
+              block
+              icon={<SaveOutlined />}
+            >
+              {vlmActive ? t("models.saved") : t("models.save")}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }

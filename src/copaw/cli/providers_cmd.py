@@ -8,6 +8,7 @@ import click
 
 from ..providers import (
     ModelInfo,
+    ModelSlotConfig,
     PROVIDERS,
     add_model,
     create_custom_provider,
@@ -18,6 +19,8 @@ from ..providers import (
     mask_api_key,
     remove_model,
     set_active_llm,
+    set_active_vlm,
+    set_active_vlm_fallbacks,
     update_provider_settings,
 )
 from .utils import prompt_choice
@@ -278,6 +281,108 @@ def configure_llm_slot_interactive(*, use_defaults: bool = False) -> None:
     click.echo(f"✓ LLM: {defn.name} / {model}")
 
 
+def configure_vlm_slot_interactive(*, use_defaults: bool = False) -> None:
+    """Interactively configure the active VLM model slot."""
+    data = load_providers_json()
+    all_providers = list_providers()
+    current_slot = data.active_vlm
+
+    eligible = _filter_eligible(data, all_providers)
+
+    if not eligible:
+        if use_defaults:
+            click.echo(
+                "No VLM provider configured. Run 'copaw models config' "
+                "to configure later.",
+            )
+            return
+        click.echo(
+            click.style(
+                "No providers are configured yet. Let's configure one now.",
+                fg="yellow",
+            ),
+        )
+        pid = configure_provider_api_key_interactive()
+        _add_models_interactive(pid)
+        data = load_providers_json()
+        current_slot = data.active_vlm
+        eligible = _filter_eligible(data, all_providers)
+        if not eligible:
+            click.echo(
+                click.style("Error: provider configuration failed.", fg="red"),
+            )
+            raise SystemExit(1)
+
+    ids = [d.id for d in eligible]
+    if use_defaults:
+        pid = (
+            current_slot.provider_id
+            if current_slot.provider_id in ids
+            else ids[0]
+        )
+    else:
+        labels = [f"{d.name} ({d.id})" for d in eligible]
+        default_label = (
+            labels[ids.index(current_slot.provider_id)]
+            if current_slot.provider_id in ids
+            else None
+        )
+        chosen_label = prompt_choice(
+            "Select provider for VLM:",
+            options=labels,
+            default=default_label,
+        )
+        pid = ids[labels.index(chosen_label)]
+
+    defn = PROVIDERS[pid]
+    model = _select_llm_model(
+        defn,
+        pid,
+        current_slot,
+        data,
+        use_defaults=use_defaults,
+    )
+    if not model and use_defaults:
+        click.echo(
+            f"No default model for {defn.name}. "
+            "Run 'copaw models config' to set one.",
+        )
+        return
+    set_active_vlm(pid, model)
+    click.echo(f"✓ VLM: {defn.name} / {model}")
+
+
+def configure_vlm_fallbacks_interactive() -> None:
+    """Interactively configure active VLM fallback models."""
+    data = load_providers_json()
+    all_providers = list_providers()
+    eligible = _filter_eligible(data, all_providers)
+    if not eligible:
+        click.echo(click.style("No configured providers.", fg="yellow"))
+        return
+
+    fallback_slots: list[ModelSlotConfig] = []
+    while click.confirm("Add a VLM fallback model?", default=False):
+        labels = [f"{d.name} ({d.id})" for d in eligible]
+        chosen_label = prompt_choice(
+            "Select provider for fallback:",
+            options=labels,
+        )
+        pid = eligible[labels.index(chosen_label)].id
+        defn = PROVIDERS[pid]
+        model = _select_llm_model(
+            defn,
+            pid,
+            data.active_vlm,
+            data,
+            use_defaults=False,
+        )
+        fallback_slots.append(ModelSlotConfig(provider_id=pid, model=model))
+
+    set_active_vlm_fallbacks(fallback_slots)
+    click.echo(f"✓ VLM fallbacks updated: {len(fallback_slots)}")
+
+
 def configure_providers_interactive(*, use_defaults: bool = False) -> None:
     """Full interactive setup: configure provider → add models →
     activate LLM."""
@@ -365,7 +470,7 @@ def list_cmd() -> None:
                     click.echo(f"    - {m.name} ({m.id}){label}")
 
     click.echo(f"\n{'═' * 44}")
-    click.echo("  Active Model Slot")
+    click.echo("  Active Model Slots")
     click.echo(f"{'═' * 44}")
 
     llm = data.active_llm
@@ -373,6 +478,15 @@ def list_cmd() -> None:
         click.echo(f"  {'LLM':16s}: {llm.provider_id} / {llm.model}")
     else:
         click.echo(f"  {'LLM':16s}: (not configured)")
+    vlm = data.active_vlm
+    if vlm.provider_id and vlm.model:
+        click.echo(f"  {'VLM':16s}: {vlm.provider_id} / {vlm.model}")
+    else:
+        click.echo(f"  {'VLM':16s}: (not configured)")
+    if data.active_vlm_fallbacks:
+        click.echo(f"  {'VLM fallback':16s}:")
+        for slot in data.active_vlm_fallbacks:
+            click.echo(f"    - {slot.provider_id} / {slot.model}")
     click.echo()
 
 
@@ -396,6 +510,18 @@ def config_key_cmd(provider_id: str | None) -> None:
 def set_llm_cmd() -> None:
     """Interactively set the active LLM model."""
     configure_llm_slot_interactive()
+
+
+@models_group.command("set-vlm")
+def set_vlm_cmd() -> None:
+    """Interactively set the active VLM model."""
+    configure_vlm_slot_interactive()
+
+
+@models_group.command("set-vlm-fallbacks")
+def set_vlm_fallbacks_cmd() -> None:
+    """Interactively set active VLM fallback models."""
+    configure_vlm_fallbacks_interactive()
 
 
 @models_group.command("add-provider")

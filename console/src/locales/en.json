@@ -268,6 +268,7 @@
     "defaultBaseUrlPlaceholder": "e.g. https://api.openai.com/v1",
     "apiKeyPrefixLabel": "API Key Prefix (optional)",
     "apiKeyPrefixPlaceholder": "e.g. sk-",
+    "apiKeyCreateHint": "You can set API Key during creation. \"API Key Prefix\" is only for format hint/validation, not the secret itself.",
     "providerCreated": "Provider \"{{name}}\" created",
     "providerCreateFailed": "Failed to create provider",
     "deleteProvider": "Delete Provider",

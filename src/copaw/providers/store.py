@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import json
+import logging
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +31,19 @@ from .registry import (
 
 _PROVIDERS_DIR = Path(__file__).resolve().parent
 _PROVIDERS_JSON = _PROVIDERS_DIR / "providers.json"
+_LOG = logging.getLogger(__name__)
+
+
+def _normalize_api_key(api_key: str) -> str:
+    """Normalize API key input.
+
+    Accept both raw tokens and values like ``Bearer <token>``.
+    """
+    key = (api_key or "").strip()
+    lower = key.lower()
+    if lower.startswith("bearer "):
+        key = key[7:].strip()
+    return key
 
 
 def get_providers_json_path() -> Path:
@@ -37,6 +53,104 @@ def get_providers_json_path() -> Path:
 def _ensure_base_url(settings: ProviderSettings, defn) -> None:
     if not settings.base_url and defn.default_base_url:
         settings.base_url = defn.default_base_url
+
+
+def _build_models_url(base_url: str) -> str:
+    """Build OpenAI-compatible models endpoint from a provider base URL."""
+    clean = (base_url or "").strip().rstrip("/")
+    if not clean:
+        return ""
+    parsed = urlsplit(clean)
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/v1"):
+        models_path = f"{path}/models"
+    else:
+        models_path = f"{path}/v1/models"
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            models_path,
+            parsed.query,
+            parsed.fragment,
+        ),
+    )
+
+
+def _fetch_openai_models(
+    base_url: str,
+    api_key: str,
+    *,
+    provider_id: str = "",
+) -> list[ModelInfo]:
+    """Fetch model list from OpenAI-compatible endpoint.
+
+    Returns an empty list if fetching/parsing fails.
+    """
+    endpoint = _build_models_url(base_url)
+    if not endpoint:
+        return []
+
+    normalized_key = _normalize_api_key(api_key)
+    headers = {"Accept": "application/json"}
+    if normalized_key:
+        headers["Authorization"] = f"Bearer {normalized_key}"
+
+    try:
+        req = Request(endpoint, headers=headers, method="GET")
+        with urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+        payload = json.loads(raw)
+    except Exception as exc:
+        if provider_id:
+            _LOG.warning(
+                "Failed to fetch models for provider '%s' from %s: %s",
+                provider_id,
+                endpoint,
+                exc,
+            )
+        else:
+            _LOG.warning("Failed to fetch models from %s: %s", endpoint, exc)
+        return []
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+
+    models: list[ModelInfo] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id")
+        if not isinstance(mid, str):
+            continue
+        mid = mid.strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        models.append(ModelInfo(id=mid, name=mid))
+    return models
+
+
+def _refresh_custom_provider_models(
+    custom_providers: dict[str, CustomProviderData],
+) -> None:
+    """Refresh models for configured custom providers.
+
+    Best-effort only: keep existing models when fetch fails or returns empty.
+    """
+    for provider_id, cpd in custom_providers.items():
+        base_url = (cpd.base_url or cpd.default_base_url or "").strip()
+        if not base_url:
+            continue
+        fetched_models = _fetch_openai_models(
+            base_url,
+            cpd.api_key,
+            provider_id=provider_id,
+        )
+        if fetched_models:
+            cpd.models = fetched_models
 
 
 def _migrate_legacy_custom(
@@ -71,7 +185,7 @@ def _migrate_legacy_custom(
 
 
 def _parse_new_format(raw: dict):
-    """Returns ``(providers, custom_providers, active_llm)``."""
+    """Returns ``(providers, custom_providers, active_llm, active_vlm, fallbacks)``."""
     providers: dict[str, ProviderSettings] = {}
     for key, value in raw.get("providers", {}).items():
         if isinstance(value, dict):
@@ -90,11 +204,31 @@ def _parse_new_format(raw: dict):
         if isinstance(llm_raw, dict)
         else ModelSlotConfig()
     )
-    return providers, custom_providers, active_llm
+    vlm_raw = raw.get("active_vlm")
+    active_vlm = (
+        ModelSlotConfig.model_validate(vlm_raw)
+        if isinstance(vlm_raw, dict)
+        else ModelSlotConfig()
+    )
+    fallbacks_raw = raw.get("active_vlm_fallbacks")
+    active_vlm_fallbacks: list[ModelSlotConfig] = []
+    if isinstance(fallbacks_raw, list):
+        for item in fallbacks_raw:
+            if isinstance(item, dict):
+                active_vlm_fallbacks.append(
+                    ModelSlotConfig.model_validate(item),
+                )
+    return (
+        providers,
+        custom_providers,
+        active_llm,
+        active_vlm,
+        active_vlm_fallbacks,
+    )
 
 
 def _parse_legacy_format(raw: dict):
-    """Returns ``(providers, custom_providers, active_llm)``."""
+    """Returns ``(providers, custom_providers, active_llm, active_vlm, fallbacks)``."""
     providers: dict[str, ProviderSettings] = {}
     custom_providers: dict[str, CustomProviderData] = {}
     old_active = raw.get("active_provider", "")
@@ -114,7 +248,7 @@ def _parse_legacy_format(raw: dict):
         if old_active
         else ModelSlotConfig()
     )
-    return providers, custom_providers, active_llm
+    return providers, custom_providers, active_llm, ModelSlotConfig(), []
 
 
 def _validate_active_llm(data: ProvidersData) -> None:
@@ -146,6 +280,26 @@ def _validate_active_llm(data: ProvidersData) -> None:
             pass
 
 
+def _validate_active_vlm(data: ProvidersData) -> None:
+    """Clear active_vlm/fallbacks if provider settings are stale."""
+    pid = data.active_vlm.provider_id
+    if pid:
+        defn = PROVIDERS.get(pid)
+        if defn is None or not data.is_configured(defn):
+            data.active_vlm = ModelSlotConfig()
+
+    valid_fallbacks: list[ModelSlotConfig] = []
+    for fallback in data.active_vlm_fallbacks:
+        fb_pid = fallback.provider_id
+        if not fb_pid:
+            continue
+        defn = PROVIDERS.get(fb_pid)
+        if defn is None or not data.is_configured(defn):
+            continue
+        valid_fallbacks.append(fallback)
+    data.active_vlm_fallbacks = valid_fallbacks
+
+
 def _ensure_all_providers(providers: dict[str, ProviderSettings]) -> None:
     """Ensure every built-in has an entry; remove stale custom/local ones."""
     for pid, defn in PROVIDERS.items():
@@ -170,22 +324,33 @@ def load_providers_json(path: Optional[Path] = None) -> ProvidersData:
     providers: dict[str, ProviderSettings] = {}
     custom_providers: dict[str, CustomProviderData] = {}
     active_llm = ModelSlotConfig()
+    active_vlm = ModelSlotConfig()
+    active_vlm_fallbacks: list[ModelSlotConfig] = []
 
     if path.is_file():
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 raw: dict = json.load(fh)
             if "providers" in raw and isinstance(raw["providers"], dict):
-                providers, custom_providers, active_llm = _parse_new_format(
-                    raw,
-                )
+                (
+                    providers,
+                    custom_providers,
+                    active_llm,
+                    active_vlm,
+                    active_vlm_fallbacks,
+                ) = _parse_new_format(raw)
             else:
-                providers, custom_providers, active_llm = _parse_legacy_format(
-                    raw,
-                )
+                (
+                    providers,
+                    custom_providers,
+                    active_llm,
+                    active_vlm,
+                    active_vlm_fallbacks,
+                ) = _parse_legacy_format(raw)
         except (json.JSONDecodeError, ValueError):
             providers = {}
 
+    _refresh_custom_provider_models(custom_providers)
     sync_custom_providers(custom_providers)
     sync_local_models()
     sync_ollama_models()
@@ -195,8 +360,11 @@ def load_providers_json(path: Optional[Path] = None) -> ProvidersData:
         providers=providers,
         custom_providers=custom_providers,
         active_llm=active_llm,
+        active_vlm=active_vlm,
+        active_vlm_fallbacks=active_vlm_fallbacks,
     )
     _validate_active_llm(data)
+    _validate_active_vlm(data)
     save_providers_json(data, path)
     return data
 
@@ -219,6 +387,11 @@ def save_providers_json(
             for pid, cpd in data.custom_providers.items()
         },
         "active_llm": data.active_llm.model_dump(mode="json"),
+        "active_vlm": data.active_vlm.model_dump(mode="json"),
+        "active_vlm_fallbacks": [
+            slot.model_dump(mode="json")
+            for slot in data.active_vlm_fallbacks
+        ],
     }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=2, ensure_ascii=False)
@@ -239,18 +412,25 @@ def update_provider_settings(
 
     if cpd is not None:
         if api_key is not None:
-            cpd.api_key = api_key
+            cpd.api_key = _normalize_api_key(api_key)
         if base_url is not None:
-            cpd.base_url = base_url
+            cpd.base_url = base_url.strip()
         if not cpd.base_url:
             cpd.base_url = cpd.default_base_url
+        fetched_models = _fetch_openai_models(
+            cpd.base_url,
+            cpd.api_key,
+            provider_id=provider_id,
+        )
+        if fetched_models:
+            cpd.models = fetched_models
         register_custom_provider(cpd)
     else:
         settings = data.providers.setdefault(provider_id, ProviderSettings())
         if api_key is not None:
-            settings.api_key = api_key
+            settings.api_key = _normalize_api_key(api_key)
         if base_url is not None:
-            settings.base_url = base_url
+            settings.base_url = base_url.strip()
         if not settings.base_url:
             defn = PROVIDERS.get(provider_id)
             if defn:
@@ -258,6 +438,11 @@ def update_provider_settings(
 
     if api_key == "" and data.active_llm.provider_id == provider_id:
         data.active_llm = ModelSlotConfig()
+    if api_key == "" and data.active_vlm.provider_id == provider_id:
+        data.active_vlm = ModelSlotConfig()
+    data.active_vlm_fallbacks = [
+        slot for slot in data.active_vlm_fallbacks if slot.provider_id != provider_id
+    ]
 
     save_providers_json(data)
     return data
@@ -266,6 +451,22 @@ def update_provider_settings(
 def set_active_llm(provider_id: str, model: str) -> ProvidersData:
     data = load_providers_json()
     data.active_llm = ModelSlotConfig(provider_id=provider_id, model=model)
+    save_providers_json(data)
+    return data
+
+
+def set_active_vlm(provider_id: str, model: str) -> ProvidersData:
+    data = load_providers_json()
+    data.active_vlm = ModelSlotConfig(provider_id=provider_id, model=model)
+    save_providers_json(data)
+    return data
+
+
+def set_active_vlm_fallbacks(
+    fallbacks: list[ModelSlotConfig],
+) -> ProvidersData:
+    data = load_providers_json()
+    data.active_vlm_fallbacks = list(fallbacks)
     save_providers_json(data)
     return data
 
@@ -285,6 +486,7 @@ def _resolve_slot(
     defn = PROVIDERS.get(pid)
     if defn is not None and defn.is_local:
         return ResolvedModelConfig(
+            provider_id=pid,
             model=slot.model,
             is_local=True,
         )
@@ -293,6 +495,7 @@ def _resolve_slot(
         return None
     base_url, api_key = data.get_credentials(pid)
     return ResolvedModelConfig(
+        provider_id=pid,
         model=slot.model,
         base_url=base_url,
         api_key=api_key,
@@ -302,6 +505,21 @@ def _resolve_slot(
 def get_active_llm_config() -> Optional[ResolvedModelConfig]:
     data = load_providers_json()
     return _resolve_slot(data.active_llm, data)
+
+
+def get_active_vlm_config() -> Optional[ResolvedModelConfig]:
+    data = load_providers_json()
+    return _resolve_slot(data.active_vlm, data)
+
+
+def get_active_vlm_fallback_configs() -> list[ResolvedModelConfig]:
+    data = load_providers_json()
+    out: list[ResolvedModelConfig] = []
+    for slot in data.active_vlm_fallbacks:
+        cfg = _resolve_slot(slot, data)
+        if cfg is not None:
+            out.append(cfg)
+    return out
 
 
 # -- Utilities --
@@ -327,6 +545,7 @@ def create_custom_provider(
     *,
     default_base_url: str = "",
     api_key_prefix: str = "",
+    api_key: str = "",
     models: Optional[list[ModelInfo]] = None,
 ) -> ProvidersData:
     err = validate_custom_provider_id(provider_id)
@@ -340,11 +559,19 @@ def create_custom_provider(
     cpd = CustomProviderData(
         id=provider_id,
         name=name,
-        default_base_url=default_base_url,
+        default_base_url=default_base_url.strip(),
         api_key_prefix=api_key_prefix,
         models=models or [],
-        base_url=default_base_url,
+        base_url=default_base_url.strip(),
+        api_key=_normalize_api_key(api_key),
     )
+    fetched_models = _fetch_openai_models(
+        cpd.base_url,
+        cpd.api_key,
+        provider_id=provider_id,
+    )
+    if fetched_models:
+        cpd.models = fetched_models
     data.custom_providers[provider_id] = cpd
     register_custom_provider(cpd)
     save_providers_json(data)
@@ -364,6 +591,11 @@ def delete_custom_provider(provider_id: str) -> ProvidersData:
 
     if data.active_llm.provider_id == provider_id:
         data.active_llm = ModelSlotConfig()
+    if data.active_vlm.provider_id == provider_id:
+        data.active_vlm = ModelSlotConfig()
+    data.active_vlm_fallbacks = [
+        slot for slot in data.active_vlm_fallbacks if slot.provider_id != provider_id
+    ]
 
     save_providers_json(data)
     return data
@@ -459,6 +691,16 @@ def remove_model(provider_id: str, model_id: str) -> ProvidersData:
         and data.active_llm.model == model_id
     ):
         data.active_llm = ModelSlotConfig()
+    if (
+        data.active_vlm.provider_id == provider_id
+        and data.active_vlm.model == model_id
+    ):
+        data.active_vlm = ModelSlotConfig()
+    data.active_vlm_fallbacks = [
+        slot
+        for slot in data.active_vlm_fallbacks
+        if not (slot.provider_id == provider_id and slot.model == model_id)
+    ]
 
     save_providers_json(data)
     return data

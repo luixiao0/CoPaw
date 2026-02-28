@@ -201,6 +201,28 @@ Tools that need extra keys (e.g. `TAVILY_API_KEY` for web search) can be set in 
 
 > **Using local models only?** If you use [Local Models](#local-models) (llama.cpp or MLX), you do **not** need any API key.
 
+## Dual model routing (LLM + VLM)
+
+CoPaw supports a text model slot (`LLM`) and a vision model slot (`VLM`).
+
+- Text-only requests use the active `LLM`.
+- Requests containing image blocks use `LLM` when it supports vision.
+- If the active `LLM` does not support vision, CoPaw routes the turn to `VLM` and then tries configured `VLM` fallbacks.
+
+CLI helpers:
+
+```bash
+copaw models set-llm
+copaw models set-vlm
+copaw models set-vlm-fallbacks
+copaw models list
+```
+
+Optional overrides for capability heuristics:
+
+- `COPAW_VISION_MODELS`: comma-separated model ids forced to vision-capable
+- `COPAW_NON_VISION_MODELS`: comma-separated model ids forced to non-vision
+
 ## Local Models
 
 CoPaw can run LLMs entirely on your machine — no API keys or cloud services required.

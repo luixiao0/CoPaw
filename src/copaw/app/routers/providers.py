@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ...providers import (
     ActiveModelsInfo,
     ModelInfo,
+    ModelSlotConfig,
     ProviderDefinition,
     ProviderInfo,
     ProvidersData,
@@ -23,6 +24,8 @@ from ...providers import (
     mask_api_key,
     remove_model,
     set_active_llm,
+    set_active_vlm,
+    set_active_vlm_fallbacks,
     update_provider_settings,
 )
 
@@ -39,11 +42,16 @@ class ModelSlotRequest(BaseModel):
     model: str = Field(..., description="Model identifier")
 
 
+class VlmFallbacksRequest(BaseModel):
+    fallbacks: List[ModelSlotRequest] = Field(default_factory=list)
+
+
 class CreateCustomProviderRequest(BaseModel):
     id: str = Field(...)
     name: str = Field(...)
     default_base_url: str = Field(default="")
     api_key_prefix: str = Field(default="")
+    api_key: str = Field(default="")
     models: List[ModelInfo] = Field(default_factory=list)
 
 
@@ -141,6 +149,7 @@ async def create_custom_provider_endpoint(
             name=body.name,
             default_base_url=body.default_base_url,
             api_key_prefix=body.api_key_prefix,
+            api_key=body.api_key,
             models=body.models,
         )
     except ValueError as exc:
@@ -210,7 +219,11 @@ async def remove_model_endpoint(
 )
 async def get_active_models() -> ActiveModelsInfo:
     data = load_providers_json()
-    return ActiveModelsInfo(active_llm=data.active_llm)
+    return ActiveModelsInfo(
+        active_llm=data.active_llm,
+        active_vlm=data.active_vlm,
+        active_vlm_fallbacks=data.active_vlm_fallbacks,
+    )
 
 
 @router.put(
@@ -246,4 +259,87 @@ async def set_active_model(
         raise HTTPException(status_code=400, detail="Model is required.")
 
     data = set_active_llm(body.provider_id, body.model)
-    return ActiveModelsInfo(active_llm=data.active_llm)
+    return ActiveModelsInfo(
+        active_llm=data.active_llm,
+        active_vlm=data.active_vlm,
+        active_vlm_fallbacks=data.active_vlm_fallbacks,
+    )
+
+
+@router.put(
+    "/active/vlm",
+    response_model=ActiveModelsInfo,
+    summary="Set active VLM",
+)
+async def set_active_vlm_model(
+    body: ModelSlotRequest = Body(...),
+) -> ActiveModelsInfo:
+    provider = get_provider(body.provider_id)
+    if provider is None:
+        raise HTTPException(
+            404,
+            detail=f"Provider '{body.provider_id}' not found",
+        )
+
+    data = load_providers_json()
+    if not data.is_configured(provider):
+        if provider.is_custom:
+            msg = (
+                f"Provider '{provider.name}' has no base_url configured. "
+                "Please configure the base URL first."
+            )
+        else:
+            msg = (
+                f"Provider '{provider.name}' has no API key configured. "
+                "Please configure the API key first."
+            )
+        raise HTTPException(status_code=400, detail=msg)
+
+    if not body.model:
+        raise HTTPException(status_code=400, detail="Model is required.")
+
+    data = set_active_vlm(body.provider_id, body.model)
+    return ActiveModelsInfo(
+        active_llm=data.active_llm,
+        active_vlm=data.active_vlm,
+        active_vlm_fallbacks=data.active_vlm_fallbacks,
+    )
+
+
+@router.put(
+    "/active/vlm/fallbacks",
+    response_model=ActiveModelsInfo,
+    summary="Set active VLM fallbacks",
+)
+async def set_active_vlm_model_fallbacks(
+    body: VlmFallbacksRequest = Body(...),
+) -> ActiveModelsInfo:
+    data = load_providers_json()
+    validated = []
+    for slot in body.fallbacks:
+        provider = get_provider(slot.provider_id)
+        if provider is None:
+            raise HTTPException(
+                404,
+                detail=f"Provider '{slot.provider_id}' not found",
+            )
+        if not data.is_configured(provider):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Provider '{provider.name}' is not configured.",
+            )
+        if not slot.model:
+            raise HTTPException(status_code=400, detail="Fallback model is required.")
+        validated.append(slot)
+
+    data = set_active_vlm_fallbacks(
+        [
+            ModelSlotConfig(provider_id=slot.provider_id, model=slot.model)
+            for slot in validated
+        ],
+    )
+    return ActiveModelsInfo(
+        active_llm=data.active_llm,
+        active_vlm=data.active_vlm,
+        active_vlm_fallbacks=data.active_vlm_fallbacks,
+    )

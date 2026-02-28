@@ -192,6 +192,40 @@ def create_model_and_formatter(
     return model, formatter
 
 
+def create_model_from_config(
+    llm_cfg: Optional["ResolvedModelConfig"],
+) -> Tuple[ChatModelBase, Type[ChatModelBase]]:
+    """Create a model instance from a specific resolved config."""
+    return _create_model_instance(llm_cfg)
+
+
+def create_formatter_for_config(
+    llm_cfg: Optional["ResolvedModelConfig"],
+) -> FormatterBase:
+    """Create formatter compatible with the provided model config."""
+    chat_model_class = _get_chat_model_class_from_provider(
+        llm_cfg.provider_id if llm_cfg else "",
+    )
+    return _create_formatter_instance(chat_model_class)
+
+
+def create_text_and_vlm_models(
+    llm_cfg: Optional["ResolvedModelConfig"],
+    vlm_cfg: Optional["ResolvedModelConfig"],
+) -> tuple[
+    ChatModelBase,
+    Optional[ChatModelBase],
+    FormatterBase,
+]:
+    """Create text model + optional VLM model with shared formatter."""
+    text_model, text_chat_class = create_model_from_config(llm_cfg)
+    formatter = _create_formatter_instance(text_chat_class)
+    if vlm_cfg is None:
+        return text_model, None, formatter
+    vlm_model, _ = create_model_from_config(vlm_cfg)
+    return text_model, vlm_model, formatter
+
+
 def _create_model_instance(
     llm_cfg: Optional["ResolvedModelConfig"],
 ) -> Tuple[ChatModelBase, Type[ChatModelBase]]:
@@ -214,7 +248,9 @@ def _create_model_instance(
         return model, OpenAIChatModel
 
     # Handle remote models - determine chat_model_class from provider config
-    chat_model_class = _get_chat_model_class_from_provider()
+    chat_model_class = _get_chat_model_class_from_provider(
+        llm_cfg.provider_id if llm_cfg else "",
+    )
 
     # Create remote model instance with configuration
     model = _create_remote_model_instance(llm_cfg, chat_model_class)
@@ -222,7 +258,7 @@ def _create_model_instance(
     return model, chat_model_class
 
 
-def _get_chat_model_class_from_provider() -> Type[ChatModelBase]:
+def _get_chat_model_class_from_provider(provider_id: str = "") -> Type[ChatModelBase]:
     """Get the chat model class from provider configuration.
 
     Returns:
@@ -231,10 +267,10 @@ def _get_chat_model_class_from_provider() -> Type[ChatModelBase]:
     chat_model_class = OpenAIChatModel  # default
     try:
         providers_data = load_providers_json()
-        provider_id = providers_data.active_llm.provider_id
-        if provider_id:
+        effective_provider_id = provider_id or providers_data.active_llm.provider_id
+        if effective_provider_id:
             chat_model_name = get_provider_chat_model(
-                provider_id,
+                effective_provider_id,
                 providers_data,
             )
             chat_model_class = get_chat_model_class(chat_model_name)
@@ -308,4 +344,7 @@ def _create_formatter_instance(
 
 __all__ = [
     "create_model_and_formatter",
+    "create_model_from_config",
+    "create_formatter_for_config",
+    "create_text_and_vlm_models",
 ]
