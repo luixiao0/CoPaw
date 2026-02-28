@@ -1814,13 +1814,10 @@ async def _overlay_labels_and_screenshot(
     """
     viewport = await page.evaluate(
         "() => ({"
-        "scrollX: window.scrollX || 0,"
-        "scrollY: window.scrollY || 0,"
         "width: window.innerWidth || 0,"
         "height: window.innerHeight || 0"
         "})",
     )
-    sx, sy = viewport["scrollX"], viewport["scrollY"]
     vw, vh = viewport["width"], viewport["height"]
 
     boxes: list[dict] = []
@@ -1842,12 +1839,12 @@ async def _overlay_labels_and_screenshot(
             skipped += 1
             continue
         x, y, w, h = box["x"], box["y"], box["width"], box["height"]
-        if x + w < sx or x > sx + vw or y + h < sy or y > sy + vh:
+        if x + w < 0 or x > vw or y + h < 0 or y > vh:
             skipped += 1
             continue
         boxes.append({
             "ref": ref,
-            "x": x - sx, "y": y - sy,
+            "x": x, "y": y,
             "w": max(1, w), "h": max(1, h),
         })
 
@@ -1868,6 +1865,9 @@ async def get_labeled_screenshot() -> bytes | None:
 
     Returns PNG bytes, or None if no browser/page/refs are available.
     Called by VLM prepass to provide grounded visual descriptions.
+
+    A fresh aria_snapshot is taken to capture lazy-loaded content that
+    may have appeared since the last auto-snapshot.
     """
     page_id = _state.get("current_page_id")
     if not page_id:
@@ -1875,10 +1875,27 @@ async def get_labeled_screenshot() -> bytes | None:
     page = _get_page(page_id)
     if not page:
         return None
-    refs = _get_refs(page_id)
+    frame_selector = _state.get("refs_frame", {}).get(page_id, "")
+
+    try:
+        root = _get_root(page, page_id, frame_selector)
+        locator = root.locator(":root")
+        raw = await locator.aria_snapshot()
+        raw_str = str(raw) if raw is not None else ""
+        _, refs = build_role_snapshot_from_aria(
+            raw_str, interactive=False, compact=False,
+        )
+        _state["refs"][page_id] = refs
+        logger.debug(
+            "Refreshed refs for labeled screenshot: %d refs", len(refs),
+        )
+    except Exception as exc:
+        logger.debug("Snapshot refresh failed, using cached refs: %s", exc)
+        refs = _get_refs(page_id)
+
     if not refs:
         return None
-    frame_selector = _state.get("refs_frame", {}).get(page_id, "")
+
     try:
         img_bytes, drawn, _ = await _overlay_labels_and_screenshot(
             page, refs, page_id, frame_selector,
