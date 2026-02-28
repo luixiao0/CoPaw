@@ -3,6 +3,7 @@ import logging
 import os
 import platform
 import sys
+from datetime import datetime
 
 
 _LEVEL_MAP = {
@@ -47,6 +48,15 @@ class ColorFormatter(logging.Formatter):
         logging.CRITICAL: "\033[41m\033[97m",
     }
     RESET = "\033[0m"
+
+    def formatTime(self, record, datefmt=None):
+        """Format timestamp with second + millisecond precision."""
+        dt = datetime.fromtimestamp(record.created)
+        if datefmt:
+            s = dt.strftime(datefmt)
+        else:
+            s = dt.strftime("%Y-%m-%d %H:%M:%S")
+        return f"{s}.{int(record.msecs):03d}"
 
     def format(self, record):
         # Disable colors if output is not a terminal (e.g. piped/redirected)
