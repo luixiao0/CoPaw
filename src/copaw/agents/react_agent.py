@@ -60,6 +60,7 @@ from ..providers import (
 )
 
 logger = logging.getLogger(__name__)
+_MEDIA_CAPABILITIES_ORDER = ("image", "audio", "video")
 
 
 class CoPawAgent(ReActAgent):
@@ -333,7 +334,7 @@ class CoPawAgent(ReActAgent):
         if capabilities and self._should_route_to_vlm(msg, capabilities):
             analyses: list[str] = []
             failures: list[str] = []
-            for capability in ("image", "audio", "video"):
+            for capability in _MEDIA_CAPABILITIES_ORDER:
                 if capability not in capabilities:
                     continue
                 result = await self._run_media_understanding(msg, capability)
@@ -359,7 +360,10 @@ class CoPawAgent(ReActAgent):
             if analyses:
                 msg = self._inject_vlm_analysis_for_llm(msg, "\n".join(analyses))
             if failures:
-                msg = self._inject_vlm_failure_for_llm(msg, "; ".join(failures))
+                msg = self._inject_vlm_failure_for_llm(
+                    msg,
+                    "; ".join(failures),
+                )
 
         # Normal message processing (or no VLM configured)
         return await super().reply(msg=msg, structured_model=structured_model)
@@ -417,17 +421,10 @@ class CoPawAgent(ReActAgent):
         capability: str,
     ):
         settings = getattr(self._vision_settings, capability)
-        env_mode = os.getenv(
-            f"COPAW_{capability.upper()}_ATTACHMENTS_MODE",
-            "",
-        ).strip().lower()
-        attachments_mode = env_mode if env_mode in {"first", "all"} else settings.attachments_mode
-        env_max_raw = os.getenv(f"COPAW_{capability.upper()}_MAX_ITEMS", "").strip()
-        try:
-            default_max = getattr(settings, "max_images", None) or settings.max_items
-            max_items = max(1, int(env_max_raw)) if env_max_raw else default_max
-        except ValueError:
-            max_items = getattr(settings, "max_images", None) or settings.max_items
+        attachments_mode, max_items = self._resolve_media_selection_policy(
+            capability=capability,
+            settings=settings,
+        )
 
         return await run_media_understanding_prepass(
             msg=msg,
@@ -443,6 +440,33 @@ class CoPawAgent(ReActAgent):
             active_vlm_model=self._vlm_model,
             run_with_runtime_model=self._run_runtime_prepass,
         )
+
+    @staticmethod
+    def _resolve_media_selection_policy(
+        *,
+        capability: str,
+        settings: Any,
+    ) -> tuple[str, int]:
+        env_mode = os.getenv(
+            f"COPAW_{capability.upper()}_ATTACHMENTS_MODE",
+            "",
+        ).strip().lower()
+        # Keep old image env compatibility.
+        if capability == "image" and not env_mode:
+            env_mode = os.getenv("COPAW_VISION_ATTACHMENTS_MODE", "").strip().lower()
+        attachments_mode = env_mode if env_mode in {"first", "all"} else settings.attachments_mode
+
+        env_max_raw = os.getenv(f"COPAW_{capability.upper()}_MAX_ITEMS", "").strip()
+        # Keep old image env compatibility.
+        if capability == "image" and not env_max_raw:
+            env_max_raw = os.getenv("COPAW_VISION_MAX_IMAGES", "").strip()
+
+        default_max = getattr(settings, "max_images", None) or settings.max_items
+        try:
+            max_items = max(1, int(env_max_raw)) if env_max_raw else default_max
+        except ValueError:
+            max_items = default_max
+        return attachments_mode, max_items
 
     async def _run_runtime_prepass(
         self,
@@ -525,7 +549,7 @@ class CoPawAgent(ReActAgent):
                     type="text",
                     text=(
                         "[VisionPrepassFailed]\n"
-                        "Image analysis is unavailable for this turn. "
+                        "Media analysis is unavailable for this turn. "
                         "Proceed with best-effort text-only reasoning and "
                         "state visual uncertainty explicitly.\n"
                         f"Reason: {error_text}\n"

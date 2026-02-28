@@ -1,10 +1,12 @@
 import { useState, useEffect, useMemo } from "react";
 import { SaveOutlined } from "@ant-design/icons";
-import { Select, Button, message, Switch, InputNumber, Input } from "@agentscope-ai/design";
+import { Button, message, Input } from "@agentscope-ai/design";
 import type { ModelSlotRequest } from "../../../../../api/types";
 import api from "../../../../../api";
 import { useTranslation } from "react-i18next";
 import styles from "../../index.module.less";
+import { MediaPrepassSection } from "./MediaPrepassSection";
+import { ModelSlotSection } from "./ModelSlotSection";
 
 interface ModelsSectionProps {
   providers: Array<{
@@ -26,6 +28,10 @@ interface ModelsSectionProps {
       provider_id?: string;
       model?: string;
     };
+    active_vlm_fallbacks?: Array<{
+      provider_id?: string;
+      model?: string;
+    }>;
     vision?: {
       image?: {
         enabled?: boolean;
@@ -78,29 +84,13 @@ export function ModelsSection({
   );
   const [llmDirty, setLlmDirty] = useState(false);
   const [vlmDirty, setVlmDirty] = useState(false);
-  const [savingVision, setSavingVision] = useState(false);
-  const [visionDirty, setVisionDirty] = useState(false);
-  const [visionImageEnabled, setVisionImageEnabled] = useState(true);
-  const [visionImageMode, setVisionImageMode] = useState<"first" | "all">("first");
-  const [visionImageMax, setVisionImageMax] = useState(4);
-  const [visionImageTimeout, setVisionImageTimeout] = useState(60);
-  const [visionImageMaxChars, setVisionImageMaxChars] = useState(4000);
-  const [visionImagePrompt, setVisionImagePrompt] = useState("");
-  const [visionAudioEnabled, setVisionAudioEnabled] = useState(false);
-  const [visionAudioMode, setVisionAudioMode] = useState<"first" | "all">("first");
-  const [visionAudioMax, setVisionAudioMax] = useState(1);
-  const [visionAudioTimeout, setVisionAudioTimeout] = useState(90);
-  const [visionAudioMaxChars, setVisionAudioMaxChars] = useState(6000);
-  const [visionAudioPrompt, setVisionAudioPrompt] = useState("");
-  const [visionVideoEnabled, setVisionVideoEnabled] = useState(false);
-  const [visionVideoMode, setVisionVideoMode] = useState<"first" | "all">("first");
-  const [visionVideoMax, setVisionVideoMax] = useState(1);
-  const [visionVideoTimeout, setVisionVideoTimeout] = useState(120);
-  const [visionVideoMaxChars, setVisionVideoMaxChars] = useState(6000);
-  const [visionVideoPrompt, setVisionVideoPrompt] = useState("");
+  const [savingFallbacks, setSavingFallbacks] = useState(false);
+  const [fallbackDirty, setFallbackDirty] = useState(false);
+  const [fallbackText, setFallbackText] = useState("");
 
   const currentLlmSlot = activeModels?.active_llm;
   const currentVlmSlot = activeModels?.active_vlm;
+  const currentVlmFallbacks = activeModels?.active_vlm_fallbacks ?? [];
 
   const eligible = useMemo(
     () =>
@@ -128,29 +118,13 @@ export function ModelsSection({
   }, [currentVlmSlot?.provider_id, currentVlmSlot?.model]);
 
   useEffect(() => {
-    const image = activeModels?.vision?.image;
-    const audio = activeModels?.vision?.audio;
-    const video = activeModels?.vision?.video;
-    setVisionImageEnabled(image?.enabled ?? true);
-    setVisionImageMode((image?.attachments_mode as "first" | "all") || "first");
-    setVisionImageMax(image?.max_images ?? 4);
-    setVisionImageTimeout(image?.timeout_seconds ?? 60);
-    setVisionImageMaxChars(image?.max_output_chars ?? 4000);
-    setVisionImagePrompt(image?.prompt_override ?? "");
-    setVisionAudioEnabled(audio?.enabled ?? false);
-    setVisionAudioMode((audio?.attachments_mode as "first" | "all") || "first");
-    setVisionAudioMax(audio?.max_items ?? 1);
-    setVisionAudioTimeout(audio?.timeout_seconds ?? 90);
-    setVisionAudioMaxChars(audio?.max_output_chars ?? 6000);
-    setVisionAudioPrompt(audio?.prompt_override ?? "");
-    setVisionVideoEnabled(video?.enabled ?? false);
-    setVisionVideoMode((video?.attachments_mode as "first" | "all") || "first");
-    setVisionVideoMax(video?.max_items ?? 1);
-    setVisionVideoTimeout(video?.timeout_seconds ?? 120);
-    setVisionVideoMaxChars(video?.max_output_chars ?? 6000);
-    setVisionVideoPrompt(video?.prompt_override ?? "");
-    setVisionDirty(false);
-  }, [activeModels?.vision]);
+    const text = currentVlmFallbacks
+      .map((f) => `${f.provider_id || ""}/${f.model || ""}`)
+      .filter((line) => line !== "/")
+      .join("\n");
+    setFallbackText(text);
+    setFallbackDirty(false);
+  }, [currentVlmFallbacks]);
 
   const llmProvider = providers.find((p) => p.id === selectedLlmProviderId);
   const llmModelOptions = llmProvider?.models ?? [];
@@ -159,6 +133,14 @@ export function ModelsSection({
   const vlmProvider = providers.find((p) => p.id === selectedVlmProviderId);
   const vlmModelOptions = vlmProvider?.models ?? [];
   const hasVlmModels = vlmModelOptions.length > 0;
+  const providerOptions = useMemo(
+    () =>
+      eligible.map((p) => ({
+        value: p.id,
+        label: p.name,
+      })),
+    [eligible],
+  );
 
   const handleLlmProviderChange = (pid: string) => {
     setSelectedLlmProviderId(pid);
@@ -216,7 +198,7 @@ export function ModelsSection({
     setSavingVlm(true);
     try {
       await api.setActiveVlm(body);
-      message.success("VLM model updated");
+      message.success(t("models.vlmModelUpdated"));
       setVlmDirty(false);
       onSaved();
     } catch (error) {
@@ -228,46 +210,45 @@ export function ModelsSection({
     }
   };
 
-  const handleSaveVision = async () => {
-    setSavingVision(true);
+  const handleSaveFallbacks = async () => {
+    let fallbacks: Array<{ provider_id: string; model: string }> = [];
     try {
-      await Promise.all([
-        api.setVisionImageSettings({
-          enabled: visionImageEnabled,
-          attachments_mode: visionImageMode,
-          max_images: visionImageMax,
-          timeout_seconds: visionImageTimeout,
-          max_output_chars: visionImageMaxChars,
-          prompt_override: visionImagePrompt,
-        }),
-        api.setVisionAudioSettings({
-          enabled: visionAudioEnabled,
-          attachments_mode: visionAudioMode,
-          max_items: visionAudioMax,
-          timeout_seconds: visionAudioTimeout,
-          max_output_chars: visionAudioMaxChars,
-          prompt_override: visionAudioPrompt,
-        }),
-        api.setVisionVideoSettings({
-          enabled: visionVideoEnabled,
-          attachments_mode: visionVideoMode,
-          max_items: visionVideoMax,
-          timeout_seconds: visionVideoTimeout,
-          max_output_chars: visionVideoMaxChars,
-          prompt_override: visionVideoPrompt,
-        }),
-      ]);
-      message.success("Vision settings updated");
-      setVisionDirty(false);
+      fallbacks = fallbackText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const idx = line.indexOf("/");
+          if (idx <= 0 || idx >= line.length - 1) {
+            throw new Error(t("models.vlmFallbackInvalidFormat", { line }));
+          }
+          return {
+            provider_id: line.slice(0, idx).trim(),
+            model: line.slice(idx + 1).trim(),
+          };
+        });
+    } catch (error) {
+      const errMsg =
+        error instanceof Error ? error.message : t("models.failedToSave");
+      message.error(errMsg);
+      return;
+    }
+
+    setSavingFallbacks(true);
+    try {
+      await api.setActiveVlmFallbacks({ fallbacks });
+      message.success(t("models.vlmFallbackUpdated"));
+      setFallbackDirty(false);
       onSaved();
     } catch (error) {
       const errMsg =
         error instanceof Error ? error.message : t("models.failedToSave");
       message.error(errMsg);
     } finally {
-      setSavingVision(false);
+      setSavingFallbacks(false);
     }
   };
+
 
   const llmActive =
     currentLlmSlot &&
@@ -283,389 +264,76 @@ export function ModelsSection({
 
   return (
     <>
-      <div className={styles.slotSection}>
-        <div className={styles.slotHeader}>
-          <h3 className={styles.slotTitle}>{t("models.llmConfiguration")}</h3>
-          {currentLlmSlot?.provider_id && currentLlmSlot?.model && (
-            <span className={styles.slotCurrent}>
-              {t("models.active", {
-                provider: currentLlmSlot.provider_id,
-                model: currentLlmSlot.model,
-              })}
-            </span>
-          )}
-        </div>
-
-        <div className={styles.slotForm}>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>{t("models.provider")}</label>
-            <Select
-              style={{ width: "100%" }}
-              placeholder={t("models.selectProvider")}
-              value={selectedLlmProviderId}
-              onChange={handleLlmProviderChange}
-              options={eligible.map((p) => ({
-                value: p.id,
-                label: p.name,
-              }))}
-            />
-          </div>
-
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>{t("models.model")}</label>
-            <Select
-              style={{ width: "100%" }}
-              placeholder={
-                hasLlmModels ? t("models.selectModel") : t("models.addModelFirst")
-              }
-              disabled={!hasLlmModels}
-              showSearch
-              optionFilterProp="label"
-              value={selectedLlmModel}
-              onChange={handleLlmModelChange}
-              options={llmModelOptions.map((m) => ({
-                value: m.id,
-                label: `${m.name} (${m.id})`,
-              }))}
-            />
-          </div>
-
-          <div
-            className={styles.slotField}
-            style={{ flex: "0 0 auto", minWidth: "120px" }}
-          >
-            <label className={styles.slotLabel} style={{ visibility: "hidden" }}>
-              {t("models.actions")}
-            </label>
-            <Button
-              type="primary"
-              loading={savingLlm}
-              disabled={!canSaveLlm}
-              onClick={handleSaveLlm}
-              block
-              icon={<SaveOutlined />}
-            >
-              {llmActive ? t("models.saved") : t("models.save")}
-            </Button>
-          </div>
-        </div>
-      </div>
+      <ModelSlotSection
+        titleKey="models.llmConfiguration"
+        currentSlot={currentLlmSlot}
+        selectedProviderId={selectedLlmProviderId}
+        selectedModel={selectedLlmModel}
+        providerOptions={providerOptions}
+        modelOptions={llmModelOptions.map((m) => ({
+          value: m.id,
+          label: `${m.name} (${m.id})`,
+        }))}
+        hasModels={hasLlmModels}
+        saving={savingLlm}
+        canSave={canSaveLlm}
+        isActive={!!llmActive}
+        onProviderChange={handleLlmProviderChange}
+        onModelChange={handleLlmModelChange}
+        onSave={handleSaveLlm}
+      />
 
       <div className={styles.slotSection}>
         <div className={styles.slotHeader}>
-          <h3 className={styles.slotTitle}>VLM Configuration</h3>
-          {currentVlmSlot?.provider_id && currentVlmSlot?.model && (
-            <span className={styles.slotCurrent}>
-              {t("models.active", {
-                provider: currentVlmSlot.provider_id,
-                model: currentVlmSlot.model,
-              })}
-            </span>
-          )}
+          <h3 className={styles.slotTitle}>{t("models.vlmFallbackChain")}</h3>
         </div>
-
-        <div className={styles.slotForm}>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>{t("models.provider")}</label>
-            <Select
-              style={{ width: "100%" }}
-              placeholder={t("models.selectProvider")}
-              value={selectedVlmProviderId}
-              onChange={handleVlmProviderChange}
-              options={eligible.map((p) => ({
-                value: p.id,
-                label: p.name,
-              }))}
-            />
-          </div>
-
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>{t("models.model")}</label>
-            <Select
-              style={{ width: "100%" }}
-              placeholder={
-                hasVlmModels ? t("models.selectModel") : t("models.addModelFirst")
-              }
-              disabled={!hasVlmModels}
-              showSearch
-              optionFilterProp="label"
-              value={selectedVlmModel}
-              onChange={handleVlmModelChange}
-              options={vlmModelOptions.map((m) => ({
-                value: m.id,
-                label: `${m.name} (${m.id})`,
-              }))}
-            />
-          </div>
-
-          <div
-            className={styles.slotField}
-            style={{ flex: "0 0 auto", minWidth: "120px" }}
-          >
-            <label className={styles.slotLabel} style={{ visibility: "hidden" }}>
-              {t("models.actions")}
-            </label>
-            <Button
-              type="primary"
-              loading={savingVlm}
-              disabled={!canSaveVlm}
-              onClick={handleSaveVlm}
-              block
-              icon={<SaveOutlined />}
-            >
-              {vlmActive ? t("models.saved") : t("models.save")}
-            </Button>
-          </div>
+        <div className={styles.slotField}>
+          <label className={styles.slotLabel}>
+            {t("models.vlmFallbackOnePerLine")}
+          </label>
+          <Input.TextArea
+            rows={4}
+            value={fallbackText}
+            onChange={(e) => {
+              setFallbackText(e.target.value);
+              setFallbackDirty(true);
+            }}
+            placeholder={t("models.vlmFallbackPlaceholder")}
+          />
         </div>
-      </div>
-
-      <div className={styles.slotSection}>
-        <div className={styles.slotHeader}>
-          <h3 className={styles.slotTitle}>Vision/Media Prepass</h3>
-        </div>
-
-        <div className={styles.visionGrid}>
-          <div className={styles.visionCard}>
-            <div className={styles.visionCardHeader}>
-              <span>Image</span>
-              <Switch
-                checked={visionImageEnabled}
-                onChange={(v) => {
-                  setVisionImageEnabled(v);
-                  setVisionDirty(true);
-                }}
-              />
-            </div>
-            <div className={styles.slotForm}>
-              <div className={styles.slotField}>
-                <label className={styles.slotLabel}>Mode</label>
-                <Select
-                  value={visionImageMode}
-                  onChange={(v) => {
-                    setVisionImageMode(v as "first" | "all");
-                    setVisionDirty(true);
-                  }}
-                  options={[
-                    { value: "first", label: "first" },
-                    { value: "all", label: "all" },
-                  ]}
-                />
-              </div>
-              <div className={styles.slotField}>
-                <label className={styles.slotLabel}>Max items</label>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={1}
-                  max={16}
-                  value={visionImageMax}
-                  onChange={(v) => {
-                    setVisionImageMax(Number(v || 1));
-                    setVisionDirty(true);
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className={styles.visionCard}>
-            <div className={styles.visionCardHeader}>
-              <span>Audio</span>
-              <Switch
-                checked={visionAudioEnabled}
-                onChange={(v) => {
-                  setVisionAudioEnabled(v);
-                  setVisionDirty(true);
-                }}
-              />
-            </div>
-            <div className={styles.slotForm}>
-              <div className={styles.slotField}>
-                <label className={styles.slotLabel}>Mode</label>
-                <Select
-                  value={visionAudioMode}
-                  onChange={(v) => {
-                    setVisionAudioMode(v as "first" | "all");
-                    setVisionDirty(true);
-                  }}
-                  options={[
-                    { value: "first", label: "first" },
-                    { value: "all", label: "all" },
-                  ]}
-                />
-              </div>
-              <div className={styles.slotField}>
-                <label className={styles.slotLabel}>Max items</label>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={1}
-                  max={8}
-                  value={visionAudioMax}
-                  onChange={(v) => {
-                    setVisionAudioMax(Number(v || 1));
-                    setVisionDirty(true);
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className={styles.visionCard}>
-            <div className={styles.visionCardHeader}>
-              <span>Video</span>
-              <Switch
-                checked={visionVideoEnabled}
-                onChange={(v) => {
-                  setVisionVideoEnabled(v);
-                  setVisionDirty(true);
-                }}
-              />
-            </div>
-            <div className={styles.slotForm}>
-              <div className={styles.slotField}>
-                <label className={styles.slotLabel}>Mode</label>
-                <Select
-                  value={visionVideoMode}
-                  onChange={(v) => {
-                    setVisionVideoMode(v as "first" | "all");
-                    setVisionDirty(true);
-                  }}
-                  options={[
-                    { value: "first", label: "first" },
-                    { value: "all", label: "all" },
-                  ]}
-                />
-              </div>
-              <div className={styles.slotField}>
-                <label className={styles.slotLabel}>Max items</label>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={1}
-                  max={4}
-                  value={visionVideoMax}
-                  onChange={(v) => {
-                    setVisionVideoMax(Number(v || 1));
-                    setVisionDirty(true);
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className={styles.visionAdvancedGrid}>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>Image timeout/max chars</label>
-            <div className={styles.visionInline}>
-              <InputNumber
-                min={5}
-                max={600}
-                value={visionImageTimeout}
-                onChange={(v) => {
-                  setVisionImageTimeout(Number(v || 60));
-                  setVisionDirty(true);
-                }}
-              />
-              <InputNumber
-                min={200}
-                max={30000}
-                value={visionImageMaxChars}
-                onChange={(v) => {
-                  setVisionImageMaxChars(Number(v || 4000));
-                  setVisionDirty(true);
-                }}
-              />
-            </div>
-          </div>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>Audio timeout/max chars</label>
-            <div className={styles.visionInline}>
-              <InputNumber
-                min={5}
-                max={600}
-                value={visionAudioTimeout}
-                onChange={(v) => {
-                  setVisionAudioTimeout(Number(v || 90));
-                  setVisionDirty(true);
-                }}
-              />
-              <InputNumber
-                min={200}
-                max={30000}
-                value={visionAudioMaxChars}
-                onChange={(v) => {
-                  setVisionAudioMaxChars(Number(v || 6000));
-                  setVisionDirty(true);
-                }}
-              />
-            </div>
-          </div>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>Video timeout/max chars</label>
-            <div className={styles.visionInline}>
-              <InputNumber
-                min={5}
-                max={600}
-                value={visionVideoTimeout}
-                onChange={(v) => {
-                  setVisionVideoTimeout(Number(v || 120));
-                  setVisionDirty(true);
-                }}
-              />
-              <InputNumber
-                min={200}
-                max={30000}
-                value={visionVideoMaxChars}
-                onChange={(v) => {
-                  setVisionVideoMaxChars(Number(v || 6000));
-                  setVisionDirty(true);
-                }}
-              />
-            </div>
-          </div>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>Image prompt override</label>
-            <Input
-              value={visionImagePrompt}
-              onChange={(e) => {
-                setVisionImagePrompt(e.target.value);
-                setVisionDirty(true);
-              }}
-            />
-          </div>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>Audio prompt override</label>
-            <Input
-              value={visionAudioPrompt}
-              onChange={(e) => {
-                setVisionAudioPrompt(e.target.value);
-                setVisionDirty(true);
-              }}
-            />
-          </div>
-          <div className={styles.slotField}>
-            <label className={styles.slotLabel}>Video prompt override</label>
-            <Input
-              value={visionVideoPrompt}
-              onChange={(e) => {
-                setVisionVideoPrompt(e.target.value);
-                setVisionDirty(true);
-              }}
-            />
-          </div>
-        </div>
-
         <div className={styles.slotActions}>
           <Button
             type="primary"
-            loading={savingVision}
-            disabled={!visionDirty}
-            onClick={handleSaveVision}
+            loading={savingFallbacks}
+            disabled={!fallbackDirty}
+            onClick={handleSaveFallbacks}
             icon={<SaveOutlined />}
           >
             {t("models.save")}
           </Button>
         </div>
       </div>
+
+      <ModelSlotSection
+        titleKey="models.vlmConfiguration"
+        currentSlot={currentVlmSlot}
+        selectedProviderId={selectedVlmProviderId}
+        selectedModel={selectedVlmModel}
+        providerOptions={providerOptions}
+        modelOptions={vlmModelOptions.map((m) => ({
+          value: m.id,
+          label: `${m.name} (${m.id})`,
+        }))}
+        hasModels={hasVlmModels}
+        saving={savingVlm}
+        canSave={canSaveVlm}
+        isActive={!!vlmActive}
+        onProviderChange={handleVlmProviderChange}
+        onModelChange={handleVlmModelChange}
+        onSave={handleSaveVlm}
+      />
+
+      <MediaPrepassSection vision={activeModels?.vision} onSaved={onSaved} />
     </>
   );
 }

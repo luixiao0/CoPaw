@@ -494,6 +494,33 @@ def set_active_vlm_fallbacks(
     return data
 
 
+def _normalize_attachments_mode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    mode = value.strip().lower()
+    return mode if mode in {"first", "all"} else "first"
+
+
+def _update_vision_capability_settings(
+    *,
+    capability: str,
+    updates: dict,
+) -> ProvidersData:
+    data = load_providers_json()
+    current = getattr(data.vision, capability)
+    payload: dict = current.model_dump(mode="json")
+    payload.update(updates)
+    model_type = type(current)
+    setattr(data.vision, capability, model_type.model_validate(payload))
+    save_providers_json(data)
+    return data
+
+
+def _get_vision_capability_settings(capability: str):
+    data = load_providers_json()
+    return getattr(data.vision, capability)
+
+
 def update_vision_image_settings(
     *,
     enabled: bool | None = None,
@@ -504,32 +531,26 @@ def update_vision_image_settings(
     max_output_chars: int | None = None,
 ) -> ProvidersData:
     """Partially update vision.image settings in providers.json."""
-    data = load_providers_json()
-    image = data.vision.image
-    payload: dict = image.model_dump(mode="json")
+    updates: dict = {}
     if enabled is not None:
-        payload["enabled"] = bool(enabled)
-    if attachments_mode is not None:
-        mode = attachments_mode.strip().lower()
-        payload["attachments_mode"] = mode if mode in {"first", "all"} else "first"
+        updates["enabled"] = bool(enabled)
+    mode = _normalize_attachments_mode(attachments_mode)
+    if mode is not None:
+        updates["attachments_mode"] = mode
     if max_images is not None:
-        payload["max_images"] = max_images
+        updates["max_images"] = max_images
     if prompt_override is not None:
-        payload["prompt_override"] = prompt_override
+        updates["prompt_override"] = prompt_override
     if timeout_seconds is not None:
-        payload["timeout_seconds"] = timeout_seconds
+        updates["timeout_seconds"] = timeout_seconds
     if max_output_chars is not None:
-        payload["max_output_chars"] = max_output_chars
-
-    data.vision.image = VisionImageSettings.model_validate(payload)
-    save_providers_json(data)
-    return data
+        updates["max_output_chars"] = max_output_chars
+    return _update_vision_capability_settings(capability="image", updates=updates)
 
 
 def get_vision_image_settings() -> VisionImageSettings:
     """Return current vision.image settings."""
-    data = load_providers_json()
-    return data.vision.image
+    return _get_vision_capability_settings("image")
 
 
 def update_vision_audio_settings(
@@ -542,32 +563,26 @@ def update_vision_audio_settings(
     max_output_chars: int | None = None,
 ) -> ProvidersData:
     """Partially update vision.audio settings in providers.json."""
-    data = load_providers_json()
-    audio = data.vision.audio
-    payload: dict = audio.model_dump(mode="json")
+    updates: dict = {}
     if enabled is not None:
-        payload["enabled"] = bool(enabled)
-    if attachments_mode is not None:
-        mode = attachments_mode.strip().lower()
-        payload["attachments_mode"] = mode if mode in {"first", "all"} else "first"
+        updates["enabled"] = bool(enabled)
+    mode = _normalize_attachments_mode(attachments_mode)
+    if mode is not None:
+        updates["attachments_mode"] = mode
     if max_items is not None:
-        payload["max_items"] = max_items
+        updates["max_items"] = max_items
     if prompt_override is not None:
-        payload["prompt_override"] = prompt_override
+        updates["prompt_override"] = prompt_override
     if timeout_seconds is not None:
-        payload["timeout_seconds"] = timeout_seconds
+        updates["timeout_seconds"] = timeout_seconds
     if max_output_chars is not None:
-        payload["max_output_chars"] = max_output_chars
-
-    data.vision.audio = VisionAudioSettings.model_validate(payload)
-    save_providers_json(data)
-    return data
+        updates["max_output_chars"] = max_output_chars
+    return _update_vision_capability_settings(capability="audio", updates=updates)
 
 
 def get_vision_audio_settings() -> VisionAudioSettings:
     """Return current vision.audio settings."""
-    data = load_providers_json()
-    return data.vision.audio
+    return _get_vision_capability_settings("audio")
 
 
 def update_vision_video_settings(
@@ -580,32 +595,26 @@ def update_vision_video_settings(
     max_output_chars: int | None = None,
 ) -> ProvidersData:
     """Partially update vision.video settings in providers.json."""
-    data = load_providers_json()
-    video = data.vision.video
-    payload: dict = video.model_dump(mode="json")
+    updates: dict = {}
     if enabled is not None:
-        payload["enabled"] = bool(enabled)
-    if attachments_mode is not None:
-        mode = attachments_mode.strip().lower()
-        payload["attachments_mode"] = mode if mode in {"first", "all"} else "first"
+        updates["enabled"] = bool(enabled)
+    mode = _normalize_attachments_mode(attachments_mode)
+    if mode is not None:
+        updates["attachments_mode"] = mode
     if max_items is not None:
-        payload["max_items"] = max_items
+        updates["max_items"] = max_items
     if prompt_override is not None:
-        payload["prompt_override"] = prompt_override
+        updates["prompt_override"] = prompt_override
     if timeout_seconds is not None:
-        payload["timeout_seconds"] = timeout_seconds
+        updates["timeout_seconds"] = timeout_seconds
     if max_output_chars is not None:
-        payload["max_output_chars"] = max_output_chars
-
-    data.vision.video = VisionVideoSettings.model_validate(payload)
-    save_providers_json(data)
-    return data
+        updates["max_output_chars"] = max_output_chars
+    return _update_vision_capability_settings(capability="video", updates=updates)
 
 
 def get_vision_video_settings() -> VisionVideoSettings:
     """Return current vision.video settings."""
-    data = load_providers_json()
-    return data.vision.video
+    return _get_vision_capability_settings("video")
 
 
 # -- Query --
