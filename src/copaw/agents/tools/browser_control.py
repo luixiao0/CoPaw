@@ -12,6 +12,7 @@ wait_for, pdf, close. Uses refs from snapshot for ref-based actions.
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -23,6 +24,444 @@ from agentscope.tool import ToolResponse
 from .browser_snapshot import build_role_snapshot_from_aria
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Stealth / anti-detection configuration
+# ---------------------------------------------------------------------------
+
+_STEALTH_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+_STEALTH_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-infobars",
+    "--disable-component-update",
+    "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection",
+    "--disable-popup-blocking",
+    "--disable-prompt-on-repost",
+    "--disable-renderer-backgrounding",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--no-service-autorun",
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--window-size=1920,1080",
+    "--disable-web-security=false",
+]
+
+_STEALTH_INIT_JS = r"""
+(() => {
+// ---- helpers: make patched functions look native in toString() ----
+const _nativeToString = Function.prototype.toString;
+const _patchedFns = new Set();
+Function.prototype.toString = function () {
+    if (_patchedFns.has(this))
+        return `function ${this.name || ''}() { [native code] }`;
+    return _nativeToString.call(this);
+};
+_patchedFns.add(Function.prototype.toString);
+
+function _makeNative(fn) { _patchedFns.add(fn); return fn; }
+function _defineGetter(obj, prop, getter) {
+    Object.defineProperty(obj, prop, {
+        get: _makeNative(getter),
+        configurable: true,
+    });
+}
+
+// ---- 1. navigator.webdriver ----
+_defineGetter(navigator, 'webdriver', function webdriver() {
+    return undefined;
+});
+
+// ---- 2. chrome.runtime ----
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+        connect: _makeNative(function connect() {}),
+        sendMessage: _makeNative(function sendMessage() {}),
+        id: undefined,
+    };
+}
+window.chrome.app = {
+    InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+    RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+    getDetails: _makeNative(function getDetails() {}),
+    getIsInstalled: _makeNative(function getIsInstalled() {}),
+    installState: _makeNative(function installState() { return 'not_installed'; }),
+    isInstalled: false,
+    runningState: _makeNative(function runningState() { return 'cannot_run'; }),
+};
+window.chrome.csi = _makeNative(function csi() { return {}; });
+window.chrome.loadTimes = _makeNative(function loadTimes() { return {}; });
+
+// ---- 3. permissions ----
+const _origQuery = navigator.permissions.query.bind(navigator.permissions);
+const _patchedQuery = _makeNative(function query(params) {
+    if (params && params.name === 'notifications')
+        return Promise.resolve({ state: Notification.permission });
+    return _origQuery(params);
+});
+navigator.permissions.query = _patchedQuery;
+
+// ---- 4. plugins & mimeTypes (realistic Chrome set) ----
+function _fakePlugin(name, desc, filename) {
+    return { name, description: desc, filename, length: 1 };
+}
+const _plugins = [
+    _fakePlugin('Chrome PDF Plugin', 'Portable Document Format', 'internal-pdf-viewer'),
+    _fakePlugin('Chrome PDF Viewer', '', 'mhjfbmdgcfjbbpaeojofohoefgiehjai'),
+    _fakePlugin('Native Client', '', 'internal-nacl-plugin'),
+];
+_defineGetter(navigator, 'plugins', function plugins() { return _plugins; });
+_defineGetter(navigator, 'mimeTypes', function mimeTypes() {
+    return [{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }];
+});
+
+// ---- 5. languages ----
+_defineGetter(navigator, 'languages', function languages() {
+    return ['zh-CN', 'zh', 'en-US', 'en'];
+});
+_defineGetter(navigator, 'language', function language() { return 'zh-CN'; });
+
+// ---- 6. platform & vendor ----
+_defineGetter(navigator, 'platform', function platform() { return 'Win32'; });
+_defineGetter(navigator, 'vendor', function vendor() { return 'Google Inc.'; });
+
+// ---- 7. hardware ----
+_defineGetter(navigator, 'hardwareConcurrency', function hardwareConcurrency() { return 8; });
+_defineGetter(navigator, 'deviceMemory', function deviceMemory() { return 8; });
+_defineGetter(navigator, 'maxTouchPoints', function maxTouchPoints() { return 0; });
+
+// ---- 8. connection / NetworkInformation ----
+if (!navigator.connection) {
+    Object.defineProperty(navigator, 'connection', {
+        value: { effectiveType: '4g', rtt: 50, downlink: 10, saveData: false },
+        configurable: true,
+    });
+}
+
+// ---- 9. screen dimensions (match viewport) ----
+for (const [p, v] of Object.entries({
+    width: 1920, height: 1080,
+    availWidth: 1920, availHeight: 1040,
+    colorDepth: 24, pixelDepth: 24,
+})) {
+    _defineGetter(screen, p, new Function(`return ${v};`));
+}
+_defineGetter(window, 'outerWidth', function outerWidth() { return 1920; });
+_defineGetter(window, 'outerHeight', function outerHeight() { return 1080; });
+_defineGetter(window, 'devicePixelRatio', function devicePixelRatio() { return 1; });
+
+// ---- 10. WebGL vendor & renderer ----
+const _getParam = WebGLRenderingContext.prototype.getParameter;
+const _patchedGetParam = _makeNative(function getParameter(param) {
+    if (param === 37445) return 'Google Inc. (NVIDIA)';
+    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+    return _getParam.call(this, param);
+});
+WebGLRenderingContext.prototype.getParameter = _patchedGetParam;
+if (typeof WebGL2RenderingContext !== 'undefined') {
+    const _getParam2 = WebGL2RenderingContext.prototype.getParameter;
+    const _patchedGetParam2 = _makeNative(function getParameter(param) {
+        if (param === 37445) return 'Google Inc. (NVIDIA)';
+        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+        return _getParam2.call(this, param);
+    });
+    WebGL2RenderingContext.prototype.getParameter = _patchedGetParam2;
+}
+
+// ---- 11. Canvas fingerprint noise ----
+const _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+HTMLCanvasElement.prototype.toDataURL = _makeNative(function toDataURL(type) {
+    const ctx = this.getContext('2d');
+    if (ctx) {
+        const shift = (0.01 * (Math.random() - 0.5));
+        const img = ctx.getImageData(0, 0, Math.min(this.width, 2), 1);
+        if (img.data.length > 0) img.data[0] = Math.max(0, img.data[0] + shift);
+        ctx.putImageData(img, 0, 0);
+    }
+    return _origToDataURL.apply(this, arguments);
+});
+const _origToBlob = HTMLCanvasElement.prototype.toBlob;
+HTMLCanvasElement.prototype.toBlob = _makeNative(function toBlob() {
+    const ctx = this.getContext('2d');
+    if (ctx) {
+        const shift = (0.01 * (Math.random() - 0.5));
+        const img = ctx.getImageData(0, 0, Math.min(this.width, 2), 1);
+        if (img.data.length > 0) img.data[0] = Math.max(0, img.data[0] + shift);
+        ctx.putImageData(img, 0, 0);
+    }
+    return _origToBlob.apply(this, arguments);
+});
+
+// ---- 12. AudioContext fingerprint ----
+if (typeof AudioContext !== 'undefined') {
+    const _origCreateOsc = AudioContext.prototype.createOscillator;
+    AudioContext.prototype.createOscillator = _makeNative(function createOscillator() {
+        const osc = _origCreateOsc.call(this);
+        const _origConnect = osc.connect.bind(osc);
+        osc.connect = _makeNative(function connect(dest) {
+            if (dest instanceof AnalyserNode) {
+                const gain = this.context.createGain();
+                gain.gain.value = 1 + (Math.random() * 0.0001 - 0.00005);
+                _origConnect(gain);
+                gain.connect(dest);
+                return dest;
+            }
+            return _origConnect(dest);
+        });
+        return osc;
+    });
+}
+
+// ---- 13. WebRTC: prevent real IP leak ----
+if (typeof RTCPeerConnection !== 'undefined') {
+    const _OrigRTC = RTCPeerConnection;
+    window.RTCPeerConnection = _makeNative(function RTCPeerConnection(cfg, constraints) {
+        if (cfg && cfg.iceServers) {
+            cfg.iceServers = cfg.iceServers.filter(
+                s => !(s.urls && /stun:|turn:/.test(s.urls.toString()))
+            );
+        }
+        return new _OrigRTC(cfg, constraints);
+    });
+    window.RTCPeerConnection.prototype = _OrigRTC.prototype;
+}
+
+// ---- 14. Notification.permission default ----
+if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    _defineGetter(Notification, 'permission', function permission() { return 'default'; });
+}
+
+// ---- 15. iframe contentWindow / contentDocument ----
+const _origContentWindow = Object.getOwnPropertyDescriptor(
+    HTMLIFrameElement.prototype, 'contentWindow'
+);
+if (_origContentWindow && _origContentWindow.get) {
+    _defineGetter(HTMLIFrameElement.prototype, 'contentWindow',
+        _makeNative(function contentWindow() {
+            return _origContentWindow.get.call(this);
+        })
+    );
+}
+
+// ---- 16. Brave / headless detection CSS queries ----
+try {
+    const _origMatchMedia = window.matchMedia.bind(window);
+    window.matchMedia = _makeNative(function matchMedia(query) {
+        if (query === '(prefers-reduced-motion: reduce)')
+            return { matches: false, media: query, addListener: ()=>{}, removeListener: ()=>{} };
+        return _origMatchMedia(query);
+    });
+} catch(_) {}
+
+// ---- 17. navigator.userAgentData (Client Hints API) ----
+if (!navigator.userAgentData) {
+    const _uaData = {
+        brands: [
+            { brand: 'Chromium', version: '131' },
+            { brand: 'Not_A Brand', version: '24' },
+            { brand: 'Google Chrome', version: '131' },
+        ],
+        mobile: false,
+        platform: 'Windows',
+        getHighEntropyValues: _makeNative(function getHighEntropyValues(hints) {
+            return Promise.resolve({
+                architecture: 'x86',
+                bitness: '64',
+                brands: [
+                    { brand: 'Chromium', version: '131.0.0.0' },
+                    { brand: 'Not_A Brand', version: '24.0.0.0' },
+                    { brand: 'Google Chrome', version: '131.0.0.0' },
+                ],
+                fullVersionList: [
+                    { brand: 'Chromium', version: '131.0.6778.86' },
+                    { brand: 'Not_A Brand', version: '24.0.0.0' },
+                    { brand: 'Google Chrome', version: '131.0.6778.86' },
+                ],
+                mobile: false,
+                model: '',
+                platform: 'Windows',
+                platformVersion: '15.0.0',
+                uaFullVersion: '131.0.6778.86',
+                wow64: false,
+            });
+        }),
+        toJSON: _makeNative(function toJSON() {
+            return {
+                brands: this.brands,
+                mobile: this.mobile,
+                platform: this.platform,
+            };
+        }),
+    };
+    Object.defineProperty(navigator, 'userAgentData', {
+        get: _makeNative(function userAgentData() { return _uaData; }),
+        configurable: true,
+    });
+}
+
+// ---- 18. Battery API ----
+if (navigator.getBattery) {
+    const _origGetBattery = navigator.getBattery.bind(navigator);
+    navigator.getBattery = _makeNative(function getBattery() {
+        return _origGetBattery().then(function(battery) {
+            try {
+                Object.defineProperties(battery, {
+                    charging: { get: () => true, configurable: true },
+                    chargingTime: { get: () => 0, configurable: true },
+                    dischargingTime: { get: () => Infinity, configurable: true },
+                    level: { get: () => 1.0, configurable: true },
+                });
+            } catch(_) {}
+            return battery;
+        });
+    });
+}
+
+// ---- 19. MediaDevices.enumerateDevices (look like a real machine) ----
+if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+    const _origEnum = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+    navigator.mediaDevices.enumerateDevices = _makeNative(function enumerateDevices() {
+        return _origEnum().then(function(devices) {
+            if (devices.length === 0) {
+                return [
+                    { deviceId: 'default', kind: 'audioinput',  label: '', groupId: 'g1' },
+                    { deviceId: 'comms',   kind: 'audioinput',  label: '', groupId: 'g1' },
+                    { deviceId: 'default', kind: 'audiooutput', label: '', groupId: 'g2' },
+                    { deviceId: 'vid1',    kind: 'videoinput',  label: '', groupId: 'g3' },
+                ];
+            }
+            return devices;
+        });
+    });
+}
+
+// ---- 20. Remove CDP / automation artifacts from window & document ----
+(function _cleanAutomationArtifacts() {
+    const domTargets = [window, document];
+    const patterns = [
+        /^__webdriver/i, /^__selenium/i, /^__fxdriver/i,
+        /^__driver/i, /^\$cdc_/, /^\$wdc_/,
+        /^cdc_/, /^wdc_/, /callPhantom/i, /phantom/i,
+        /_Selenium_IDE/i, /callSelenium/i, /domAutomation/i,
+        /domAutomationController/i,
+    ];
+    for (const target of domTargets) {
+        try {
+            for (const key of Object.getOwnPropertyNames(target)) {
+                if (patterns.some(p => p.test(key))) {
+                    try { delete target[key]; } catch(_) {}
+                }
+            }
+        } catch(_) {}
+    }
+})();
+
+// ---- 21. Error stack trace scrubbing ----
+const _OrigError = Error;
+const _origCaptureStack = Error.captureStackTrace;
+if (_origCaptureStack) {
+    Error.captureStackTrace = _makeNative(function captureStackTrace(target, ctor) {
+        _origCaptureStack.call(_OrigError, target, ctor);
+        if (target.stack) {
+            target.stack = target.stack
+                .split('\n')
+                .filter(l => !/playwright|puppeteer|__pw_|__wdc_|DevTools/i.test(l))
+                .join('\n');
+        }
+    });
+}
+
+// ---- 22. Keyboard / Pointer event isTrusted can't be spoofed, but ----
+// ensure automation-dispatched events look normal by patching
+// getOwnPropertyDescriptor for isTrusted (advanced detectors)
+try {
+    const _origGetOwnPD = Object.getOwnPropertyDescriptor;
+    Object.getOwnPropertyDescriptor = _makeNative(function getOwnPropertyDescriptor(obj, prop) {
+        if (prop === 'isTrusted' && (obj instanceof Event || obj === Event.prototype)) {
+            return { get: () => true, configurable: false };
+        }
+        return _origGetOwnPD.call(Object, obj, prop);
+    });
+} catch(_) {}
+
+})();
+"""
+
+
+def _stealth_context_options() -> dict[str, Any]:
+    """Return context kwargs that make the browser look like a real user."""
+    return {
+        "user_agent": _STEALTH_USER_AGENT,
+        "viewport": {"width": 1920, "height": 1080},
+        "screen": {"width": 1920, "height": 1080},
+        "locale": "zh-CN",
+        "timezone_id": "Asia/Shanghai",
+        "color_scheme": "light",
+        "device_scale_factor": 1,
+        "has_touch": False,
+        "is_mobile": False,
+        "extra_http_headers": {
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        },
+    }
+
+
+def _detect_chrome_executable() -> str | None:
+    """Auto-detect the user's installed Chrome/Edge executable path."""
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(env, "")
+            if base:
+                candidates.append(
+                    os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"),
+                )
+                candidates.append(
+                    os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+                )
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ])
+    else:
+        candidates.extend(["google-chrome", "google-chrome-stable", "chromium-browser"])
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _detect_chrome_user_data_dir() -> str | None:
+    """Auto-detect the default Chrome user data directory."""
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            d = os.path.join(local, "Google", "Chrome", "User Data")
+            if os.path.isdir(d):
+                return d
+    elif sys.platform == "darwin":
+        d = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+        if os.path.isdir(d):
+            return d
+    else:
+        d = os.path.expanduser("~/.config/google-chrome")
+        if os.path.isdir(d):
+            return d
+    return None
+
 
 # Process-global browser state (one browser, multiple pages by page_id)
 _state: dict[str, Any] = {
@@ -119,6 +558,8 @@ async def browser_use(  # pylint: disable=R0911,R0912
     text_gone: str = "",
     frame_selector: str = "",
     headed: bool = False,
+    user_data_dir: str = "",
+    channel: str = "",
 ) -> ToolResponse:
     """Control browser (Playwright). Default is headless. Use headed=True with
     action=start to open a visible browser window. Flow: start, open(url),
@@ -230,9 +671,17 @@ async def browser_use(  # pylint: disable=R0911,R0912
         headed (bool):
             When True with action=start, launch a visible browser window
             (non-headless). User can see the real browser. Default False.
-        headed (bool):
-            When True with action=start, launch a visible browser window
-            (non-headless). User can see the real browser. Default False.
+        user_data_dir (str):
+            Path to a Chrome/Chromium user data directory. When provided
+            with action=start, a persistent browser context is launched
+            that shares cookies, localStorage, and login sessions with the
+            real browser. Pass "auto" to auto-detect the default Chrome
+            profile. IMPORTANT: the real Chrome must be fully closed first.
+        channel (str):
+            Browser channel. Set to "chrome" or "msedge" with action=start
+            to use the user's installed Chrome/Edge instead of bundled
+            Chromium. Pass "auto" to auto-detect. Only effective with
+            action=start.
     """
     action = (action or "").strip().lower()
     if not action:
@@ -256,7 +705,11 @@ async def browser_use(  # pylint: disable=R0911,R0912
 
     try:
         if action == "start":
-            return await _action_start(headed=headed)
+            return await _action_start(
+                headed=headed,
+                user_data_dir=user_data_dir,
+                channel=channel,
+            )
         if action == "stop":
             return await _action_stop()
         if action == "open":
@@ -508,8 +961,12 @@ async def _ensure_browser() -> bool:
     try:
         async_playwright = _ensure_playwright_async()
         pw = await async_playwright().start()
-        pw_browser = await pw.chromium.launch(headless=_state["headless"])
-        context = await pw_browser.new_context()
+        pw_browser = await pw.chromium.launch(
+            headless=_state["headless"],
+            args=_STEALTH_LAUNCH_ARGS,
+        )
+        context = await pw_browser.new_context(**_stealth_context_options())
+        await context.add_init_script(_STEALTH_INIT_JS)
         _attach_context_listeners(context)
         _state["playwright"] = pw
         _state["browser"] = pw_browser
@@ -519,30 +976,33 @@ async def _ensure_browser() -> bool:
         return False
 
 
-async def _action_start(headed: bool = False) -> ToolResponse:
-    # If user asks for visible window (headed=True)
-    # but browser is already running headless, restart with headed
-    if _state["browser"] is not None:
+def _reset_state() -> None:
+    """Clear all browser state entries."""
+    _state["playwright"] = None
+    _state["browser"] = None
+    _state["context"] = None
+    _state["pages"].clear()
+    _state["refs"].clear()
+    _state["refs_frame"].clear()
+    _state["console_logs"].clear()
+    _state["network_requests"].clear()
+    _state["pending_dialogs"].clear()
+    _state["pending_file_choosers"].clear()
+    _state["current_page_id"] = None
+    _state["page_counter"] = 0
+
+
+async def _action_start(
+    headed: bool = False,
+    user_data_dir: str = "",
+    channel: str = "",
+) -> ToolResponse:
+    need_restart = False
+    if _state["browser"] is not None or _state["context"] is not None:
         if headed and _state["headless"]:
-            try:
-                await _state["browser"].close()
-                if _state["playwright"] is not None:
-                    await _state["playwright"].stop()
-            except Exception:
-                pass
-            finally:
-                _state["playwright"] = None
-                _state["browser"] = None
-                _state["context"] = None
-                _state["pages"].clear()
-                _state["refs"].clear()
-                _state["refs_frame"].clear()
-                _state["console_logs"].clear()
-                _state["network_requests"].clear()
-                _state["pending_dialogs"].clear()
-                _state["pending_file_choosers"].clear()
-                _state["current_page_id"] = None
-                _state["page_counter"] = 0
+            need_restart = True
+        elif user_data_dir and not _state.get("persistent"):
+            need_restart = True
         else:
             return _tool_response(
                 json.dumps(
@@ -551,7 +1011,19 @@ async def _action_start(headed: bool = False) -> ToolResponse:
                     indent=2,
                 ),
             )
-    # Default: headless (background). Only headed=True (e.g. browser_visible skill) shows window.
+    if need_restart:
+        try:
+            if _state["browser"] is not None:
+                await _state["browser"].close()
+            elif _state["context"] is not None:
+                await _state["context"].close()
+            if _state["playwright"] is not None:
+                await _state["playwright"].stop()
+        except Exception:
+            pass
+        finally:
+            _reset_state()
+
     _state["headless"] = not headed
     try:
         async_playwright = _ensure_playwright_async()
@@ -563,27 +1035,103 @@ async def _action_start(headed: bool = False) -> ToolResponse:
                 indent=2,
             ),
         )
+
+    # Resolve user_data_dir="auto"
+    resolved_data_dir = ""
+    if user_data_dir:
+        if user_data_dir.strip().lower() == "auto":
+            resolved_data_dir = _detect_chrome_user_data_dir() or ""
+            if not resolved_data_dir:
+                return _tool_response(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": "Could not auto-detect Chrome user data dir. "
+                            "Provide an explicit path.",
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                )
+        else:
+            resolved_data_dir = user_data_dir.strip()
+
+    # Resolve channel="auto"
+    resolved_channel = ""
+    if channel:
+        ch = channel.strip().lower()
+        if ch == "auto":
+            exe = _detect_chrome_executable()
+            if exe:
+                resolved_channel = exe
+        elif ch in ("chrome", "msedge", "chromium"):
+            resolved_channel = ch
+        else:
+            resolved_channel = ch
+
+    launch_kwargs: dict[str, Any] = {
+        "headless": _state["headless"],
+        "args": _STEALTH_LAUNCH_ARGS,
+    }
+    if resolved_channel:
+        if os.path.isfile(resolved_channel):
+            launch_kwargs["executable_path"] = resolved_channel
+        else:
+            launch_kwargs["channel"] = resolved_channel
+
     try:
         pw = await async_playwright().start()
-        pw_browser = await pw.chromium.launch(headless=_state["headless"])
-        context = await pw_browser.new_context()
-        _attach_context_listeners(context)
-        _state["playwright"] = pw
-        _state["browser"] = pw_browser
-        _state["context"] = context
-        msg = (
-            "Browser started (visible window)"
-            if _state["headless"] is False
-            else "Browser started"
-        )
-        msg = (
-            "Browser started (visible window)"
-            if _state["headless"] is False
-            else "Browser started"
-        )
+
+        if resolved_data_dir:
+            # Persistent context: shares cookies/sessions with real browser.
+            # launch_persistent_context returns a BrowserContext directly.
+            ctx_opts = _stealth_context_options()
+            ctx_opts.update(launch_kwargs)
+            ctx_opts.pop("headless", None)
+            context = await pw.chromium.launch_persistent_context(
+                resolved_data_dir,
+                headless=_state["headless"],
+                **ctx_opts,
+            )
+            await context.add_init_script(_STEALTH_INIT_JS)
+            _attach_context_listeners(context)
+            _state["playwright"] = pw
+            _state["browser"] = None  # no separate browser object
+            _state["context"] = context
+            _state["persistent"] = True
+
+            # Persistent context may already have pages open
+            for page in context.pages:
+                pid = _next_page_id()
+                _state["pages"][pid] = page
+                _state["refs"][pid] = {}
+                _state["console_logs"][pid] = []
+                _state["network_requests"][pid] = []
+                _state["pending_dialogs"][pid] = []
+                _state["pending_file_choosers"][pid] = []
+                _attach_page_listeners(page, pid)
+                _state["current_page_id"] = pid
+        else:
+            pw_browser = await pw.chromium.launch(**launch_kwargs)
+            context = await pw_browser.new_context(**_stealth_context_options())
+            await context.add_init_script(_STEALTH_INIT_JS)
+            _attach_context_listeners(context)
+            _state["playwright"] = pw
+            _state["browser"] = pw_browser
+            _state["context"] = context
+            _state["persistent"] = False
+
+        parts = []
+        if not _state["headless"]:
+            parts.append("visible window")
+        if resolved_data_dir:
+            parts.append(f"profile={resolved_data_dir}")
+        if resolved_channel:
+            parts.append(f"channel={resolved_channel}")
+        detail = f" ({', '.join(parts)})" if parts else ""
         return _tool_response(
             json.dumps(
-                {"ok": True, "message": msg},
+                {"ok": True, "message": f"Browser started{detail}"},
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -599,7 +1147,7 @@ async def _action_start(headed: bool = False) -> ToolResponse:
 
 
 async def _action_stop() -> ToolResponse:
-    if _state["browser"] is None:
+    if _state["browser"] is None and _state["context"] is None:
         return _tool_response(
             json.dumps(
                 {"ok": True, "message": "Browser not running"},
@@ -608,7 +1156,10 @@ async def _action_stop() -> ToolResponse:
             ),
         )
     try:
-        await _state["browser"].close()
+        if _state["browser"] is not None:
+            await _state["browser"].close()
+        elif _state["context"] is not None:
+            await _state["context"].close()
         if _state["playwright"] is not None:
             await _state["playwright"].stop()
     except Exception as e:
@@ -620,19 +1171,8 @@ async def _action_stop() -> ToolResponse:
             ),
         )
     finally:
-        _state["playwright"] = None
-        _state["browser"] = None
-        _state["context"] = None
-        _state["pages"].clear()
-        _state["refs"].clear()
-        _state["refs_frame"].clear()
-        _state["console_logs"].clear()
-        _state["network_requests"].clear()
-        _state["pending_dialogs"].clear()
-        _state["pending_file_choosers"].clear()
-        _state["current_page_id"] = None
-        _state["page_counter"] = 0
-        _state["headless"] = True  # next start defaults to background
+        _reset_state()
+        _state["headless"] = True
     return _tool_response(
         json.dumps(
             {"ok": True, "message": "Browser stopped"},
