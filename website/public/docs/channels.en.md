@@ -432,22 +432,27 @@ done). **✗** = not supported (not possible on this channel).
 | DingTalk | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
 | Feishu   | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
 | Discord  | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | 🚧         | 🚧         | 🚧         | 🚧        |
+| Telegram | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | 🚧         | 🚧         | 🚧         | 🚧        |
 | iMessage | ✓         | ✗          | ✗          | ✗          | ✗         | ✓         | ✗          | ✗          | ✗          | ✗         |
-| QQ       | ✓         | 🚧         | 🚧         | 🚧         | 🚧        | ✓         | 🚧         | 🚧         | 🚧         | 🚧        |
+| QQ       | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | 🚧         | 🚧         | 🚧         | 🚧        |
 
 Notes:
 
 - **DingTalk**: Receives rich text and single-file (downloadCode); sends
   image / voice / video / file via session webhook.
 - **Feishu**: WebSocket long connection for receiving; Open API for sending.
-  Text / image / file supported both ways; message metadata includes
+  Receive side supports text / image / file / audio-video (downloaded by message
+  type and resource key); message metadata includes
   `feishu_chat_id` and `feishu_message_id` for group context and dedup.
 - **Discord**: Attachments are parsed as image / video / audio / file for the
   agent; sending real media is 🚧 (currently link-only in reply).
+- **Telegram**: Receive side supports text + attachments, and resolves `file_id`
+  to downloadable URLs before passing to the agent; sending real media is 🚧
+  (currently link-only in reply).
 - **iMessage**: imsg + database polling; text only; attachments are ✗ (not
   possible on this channel).
-- **QQ**: Receiving attachments as multimodal and sending real media are 🚧;
-  currently text + link-only.
+- **QQ**: Receive side supports parsing attachments as image / video / audio /
+  file for the agent; sending real media remains 🚧 (currently text + link-only).
 
 ### Changing config via HTTP
 

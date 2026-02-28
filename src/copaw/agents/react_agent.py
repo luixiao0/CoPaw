@@ -27,6 +27,7 @@ from .image_understanding import (
     get_last_message,
     run_media_understanding_prepass,
 )
+from .vision_prepass import format_vlm_prepass_context
 from .prompt import build_system_prompt_from_working_dir
 from .skills_manager import (
     ensure_skills_initialized,
@@ -332,8 +333,11 @@ class CoPawAgent(ReActAgent):
         # primary LLM lacks required modalities.
         capabilities = self._message_media_capabilities(msg)
         if capabilities and self._should_route_to_vlm(msg, capabilities):
-            analyses: list[str] = []
+            raw_analyses: list[str] = []
+            readable_analyses: list[str] = []
             failures: list[str] = []
+            source = self._get_last_message(msg)
+            user_text = source.get_text_content() if isinstance(source, Msg) else ""
             for capability in _MEDIA_CAPABILITIES_ORDER:
                 if capability not in capabilities:
                     continue
@@ -347,7 +351,14 @@ class CoPawAgent(ReActAgent):
                         result.decision.selected_item_count,
                         len(result.decision.attempts),
                     )
-                    analyses.append(f"[{capability}] {result.analysis}")
+                    raw_analyses.append(f"[{capability}] {result.analysis}")
+                    readable = format_vlm_prepass_context(
+                        capability,
+                        result.analysis,
+                        user_text=user_text,
+                    )
+                    if readable:
+                        readable_analyses.append(readable)
                 else:
                     reason = result.decision.reason or result.decision.outcome
                     logger.warning(
@@ -357,8 +368,12 @@ class CoPawAgent(ReActAgent):
                     )
                     failures.append(f"{capability}: {reason}")
 
-            if analyses:
-                msg = self._inject_vlm_analysis_for_llm(msg, "\n".join(analyses))
+            if raw_analyses:
+                msg = self._inject_vlm_analysis_for_llm(
+                    msg,
+                    raw_analysis="\n".join(raw_analyses),
+                    readable_analysis="\n\n".join(readable_analyses),
+                )
             if failures:
                 msg = self._inject_vlm_failure_for_llm(
                     msg,
@@ -495,34 +510,36 @@ class CoPawAgent(ReActAgent):
     def _inject_vlm_analysis_for_llm(
         self,
         msg: Msg | list[Msg] | None,
-        analysis: str,
+        raw_analysis: str,
+        readable_analysis: str = "",
     ) -> Msg | list[Msg] | None:
-        """Remove raw media blocks and inject prepass analysis back to LLM context."""
+        """Inject both raw and readable media analysis into LLM context."""
         target = self._get_last_message(msg)
+        sections = [
+            "[VisionPrepass]",
+            raw_analysis,
+            "[/VisionPrepass]",
+        ]
+        if readable_analysis.strip():
+            sections.extend(
+                [
+                    "",
+                    "[MediaUnderstanding]",
+                    readable_analysis,
+                    "[/MediaUnderstanding]",
+                ],
+            )
         analysis_block = TextBlock(
             type="text",
-            text=(
-                "[VisionPrepass]\n"
-                f"{analysis}\n"
-                "[/VisionPrepass]"
-            ),
+            text="\n".join(sections),
         )
 
         if isinstance(target.content, list):
-            filtered = [
-                block
-                for block in target.content
-                if not (
-                    isinstance(block, dict)
-                    and block.get("type") in {"image", "audio", "video"}
-                )
-            ]
-            filtered.append(analysis_block)
-            target.content = filtered
+            target.content = [*target.content, analysis_block]
         elif isinstance(target.content, str):
             target.content = (
                 f"{target.content}\n\n[Vision analysis from helper model]\n"
-                f"{analysis}\n[End vision analysis]"
+                f"{analysis_block.text}\n[End vision analysis]"
             )
         else:
             target.content = [analysis_block]
@@ -536,15 +553,8 @@ class CoPawAgent(ReActAgent):
         """Inject graceful degradation note when VLM prepass fails."""
         target = self._get_last_message(msg)
         if isinstance(target.content, list):
-            filtered = [
-                block
-                for block in target.content
-                if not (
-                    isinstance(block, dict)
-                    and block.get("type") in {"image", "audio", "video"}
-                )
-            ]
-            filtered.append(
+            target.content = [
+                *target.content,
                 TextBlock(
                     type="text",
                     text=(
@@ -556,8 +566,7 @@ class CoPawAgent(ReActAgent):
                         "[/VisionPrepassFailed]"
                     ),
                 ),
-            )
-            target.content = filtered
+            ]
         return msg
 
     async def _reply_with_runtime_model(

@@ -1,5 +1,6 @@
 from copaw.agents.vision_prepass import (
     build_vlm_prepass_prompt,
+    format_vlm_prepass_context,
     normalize_vlm_prepass_output,
 )
 
@@ -34,4 +35,20 @@ def test_normalize_vlm_output_fallback_from_plain_text() -> None:
     normalized = normalize_vlm_prepass_output(raw)
     assert '"confidence": "medium"' in normalized
     assert '"ocr_text": []' in normalized
+
+
+def test_format_vlm_prepass_context_readable() -> None:
+    normalized = normalize_vlm_prepass_output(
+        '{"ocr_text":["Total: 42"],"key_entities":["invoice"],"confidence":"high"}',
+    )
+    readable = format_vlm_prepass_context(
+        "image",
+        normalized,
+        user_text="check this invoice",
+    )
+    assert "[Image]" in readable
+    assert "User text:" in readable
+    assert "OCR:" in readable
+    assert "Key entities:" in readable
+    assert "Confidence: high" in readable
 

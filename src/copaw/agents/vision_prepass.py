@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
 _OBJECT_RE = re.compile(r"(\{[\s\S]*\})")
@@ -44,6 +45,48 @@ def normalize_vlm_prepass_output(raw: str) -> str:
         "confidence": _norm_confidence(parsed.get("confidence")),
     }
     return json.dumps(normalized, ensure_ascii=False)
+
+
+def format_vlm_prepass_context(
+    capability: Literal["image", "audio", "video"],
+    normalized_json: str,
+    *,
+    user_text: str = "",
+) -> str:
+    """Render normalized prepass JSON into readable context text."""
+    parsed = _parse_json_payload(normalized_json)
+    if not isinstance(parsed, dict):
+        return ""
+
+    label = {
+        "image": "Image",
+        "audio": "Audio",
+        "video": "Video",
+    }.get(capability, "Media")
+
+    ocr = _norm_list(parsed.get("ocr_text"))
+    entities = _norm_list(parsed.get("key_entities"))
+    layout = _norm_list(parsed.get("spatial_layout_cues"))
+    ambiguities = _norm_list(parsed.get("ambiguities"))
+    follow_ups = _norm_list(parsed.get("follow_up_checks"))
+    confidence = _norm_confidence(parsed.get("confidence"))
+
+    lines: list[str] = [f"[{label}]"]
+    cleaned_user_text = (user_text or "").strip()
+    if cleaned_user_text:
+        lines.append(f"User text:\n{cleaned_user_text}")
+    if ocr:
+        lines.append("OCR:\n- " + "\n- ".join(ocr))
+    if entities:
+        lines.append("Key entities:\n- " + "\n- ".join(entities))
+    if layout:
+        lines.append("Layout cues:\n- " + "\n- ".join(layout))
+    if ambiguities:
+        lines.append("Ambiguities:\n- " + "\n- ".join(ambiguities))
+    if follow_ups:
+        lines.append("Follow-up checks:\n- " + "\n- ".join(follow_ups))
+    lines.append(f"Confidence: {confidence}")
+    return "\n".join(lines)
 
 
 def _parse_json_payload(raw: str):

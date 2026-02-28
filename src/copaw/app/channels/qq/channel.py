@@ -23,6 +23,10 @@ import aiohttp
 from agentscope_runtime.engine.schemas.agent_schemas import (
     RunStatus,
     TextContent,
+    ImageContent,
+    VideoContent,
+    AudioContent,
+    FileContent,
     ContentType,
 )
 
@@ -34,6 +38,7 @@ from ..base import (
     OutgoingContentPart,
     ProcessHandler,
 )
+from ..media_utils import classify_media_kind, pick_attachment_url
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +452,81 @@ class QQChannel(BaseChannel):
             channel_meta=meta,
         )
 
+    @staticmethod
+    def _build_content_parts(
+        text: str,
+        attachments: List[Dict[str, Any]],
+    ) -> List[Any]:
+        """Build runtime content parts from QQ text + attachment metadata."""
+        content_parts: List[Any] = []
+        normalized_text = (text or "").strip()
+        if normalized_text:
+            content_parts.append(
+                TextContent(
+                    type=ContentType.TEXT,
+                    text=normalized_text,
+                ),
+            )
+
+        for att in attachments or []:
+            if not isinstance(att, dict):
+                continue
+            url = pick_attachment_url(att)
+            if not isinstance(url, str) or not url.strip():
+                continue
+            filename = str(
+                att.get("filename")
+                or att.get("file_name")
+                or att.get("name")
+                or "",
+            ).lower()
+            ctype = str(
+                att.get("content_type")
+                or att.get("contentType")
+                or att.get("mime_type")
+                or att.get("mimeType")
+                or "",
+            ).lower()
+            kind = classify_media_kind(mime_type=ctype, filename=filename)
+            if kind == "image":
+                content_parts.append(
+                    ImageContent(
+                        type=ContentType.IMAGE,
+                        image_url=url,
+                    ),
+                )
+            elif kind == "video":
+                content_parts.append(
+                    VideoContent(
+                        type=ContentType.VIDEO,
+                        video_url=url,
+                    ),
+                )
+            elif kind == "audio":
+                content_parts.append(
+                    AudioContent(
+                        type=ContentType.AUDIO,
+                        data=url,
+                    ),
+                )
+            else:
+                content_parts.append(
+                    FileContent(
+                        type=ContentType.FILE,
+                        file_url=url,
+                    ),
+                )
+
+        # Ensure media-only messages can pass debounce checks.
+        if not content_parts:
+            content_parts.append(
+                TextContent(
+                    type=ContentType.TEXT,
+                    text="",
+                ),
+            )
+        return content_parts
+
     async def consume_one(self, payload: Any) -> None:
         """Process one AgentRequest from manager queue."""
         request = payload
@@ -717,12 +797,7 @@ class QQChannel(BaseChannel):
                             native = {
                                 "channel_id": "qq",
                                 "sender_id": sender,
-                                "content_parts": [
-                                    TextContent(
-                                        type=ContentType.TEXT,
-                                        text=text,
-                                    ),
-                                ],
+                                "content_parts": self._build_content_parts(text, att),
                                 "meta": meta,
                             }
                             request = self.build_agent_request_from_native(
@@ -769,12 +844,7 @@ class QQChannel(BaseChannel):
                             native = {
                                 "channel_id": "qq",
                                 "sender_id": sender,
-                                "content_parts": [
-                                    TextContent(
-                                        type=ContentType.TEXT,
-                                        text=text,
-                                    ),
-                                ],
+                                "content_parts": self._build_content_parts(text, att),
                                 "meta": meta,
                             }
                             request = self.build_agent_request_from_native(
@@ -821,12 +891,7 @@ class QQChannel(BaseChannel):
                             native = {
                                 "channel_id": "qq",
                                 "sender_id": sender,
-                                "content_parts": [
-                                    TextContent(
-                                        type=ContentType.TEXT,
-                                        text=text,
-                                    ),
-                                ],
+                                "content_parts": self._build_content_parts(text, att),
                                 "meta": meta,
                             }
                             request = self.build_agent_request_from_native(
@@ -870,12 +935,7 @@ class QQChannel(BaseChannel):
                             native = {
                                 "channel_id": "qq",
                                 "sender_id": sender,
-                                "content_parts": [
-                                    TextContent(
-                                        type=ContentType.TEXT,
-                                        text=text,
-                                    ),
-                                ],
+                                "content_parts": self._build_content_parts(text, att),
                                 "meta": meta,
                             }
                             request = self.build_agent_request_from_native(

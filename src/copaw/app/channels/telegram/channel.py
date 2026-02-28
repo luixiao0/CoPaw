@@ -22,7 +22,33 @@ from ..base import BaseChannel, OnReplySent, ProcessHandler
 logger = logging.getLogger(__name__)
 
 
-def _build_content_parts_from_message(update: Any) -> list:
+async def _resolve_telegram_file_url(
+    *,
+    bot: Any,
+    file_id: str,
+    bot_token: str,
+) -> Optional[str]:
+    """Resolve Telegram file_id into a downloadable URL."""
+    try:
+        tg_file = await bot.get_file(file_id)
+    except Exception:
+        logger.exception("telegram: get_file failed for file_id=%s", file_id)
+        return None
+
+    file_path = (getattr(tg_file, "file_path", None) or "").strip()
+    if not file_path:
+        return None
+    if file_path.startswith("http://") or file_path.startswith("https://"):
+        return file_path
+    return f"https://api.telegram.org/file/bot{bot_token}/{file_path.lstrip('/')}"
+
+
+async def _build_content_parts_from_message(
+    update: Any,
+    *,
+    bot: Any,
+    bot_token: str,
+) -> list:
     """Build runtime content_parts from Telegram message (text, photo, doc, etc.)."""
     message = getattr(update, "message", None) or getattr(update, "edited_message")
     if not message:
@@ -39,9 +65,16 @@ def _build_content_parts_from_message(update: Any) -> list:
         largest = photo[-1]
         file_id = getattr(largest, "file_id", None)
         if file_id:
-            # We pass file_id; sender will need to resolve to URL via getFile
+            file_url = await _resolve_telegram_file_url(
+                bot=bot,
+                file_id=file_id,
+                bot_token=bot_token,
+            )
             content_parts.append(
-                ImageContent(type=ContentType.IMAGE, image_url=f"tg://file_id/{file_id}")
+                ImageContent(
+                    type=ContentType.IMAGE,
+                    image_url=file_url or f"tg://file_id/{file_id}",
+                ),
             )
 
     # Document, audio, video, voice
@@ -49,32 +82,64 @@ def _build_content_parts_from_message(update: Any) -> list:
     if doc:
         file_id = getattr(doc, "file_id", None)
         if file_id:
+            file_url = await _resolve_telegram_file_url(
+                bot=bot,
+                file_id=file_id,
+                bot_token=bot_token,
+            )
             content_parts.append(
-                FileContent(type=ContentType.FILE, file_url=f"tg://file_id/{file_id}")
+                FileContent(
+                    type=ContentType.FILE,
+                    file_url=file_url or f"tg://file_id/{file_id}",
+                ),
             )
 
     video = getattr(message, "video", None)
     if video:
         file_id = getattr(video, "file_id", None)
         if file_id:
+            file_url = await _resolve_telegram_file_url(
+                bot=bot,
+                file_id=file_id,
+                bot_token=bot_token,
+            )
             content_parts.append(
-                VideoContent(type=ContentType.VIDEO, video_url=f"tg://file_id/{file_id}")
+                VideoContent(
+                    type=ContentType.VIDEO,
+                    video_url=file_url or f"tg://file_id/{file_id}",
+                ),
             )
 
     voice = getattr(message, "voice", None)
     if voice:
         file_id = getattr(voice, "file_id", None)
         if file_id:
+            file_url = await _resolve_telegram_file_url(
+                bot=bot,
+                file_id=file_id,
+                bot_token=bot_token,
+            )
             content_parts.append(
-                AudioContent(type=ContentType.AUDIO, data=f"tg://file_id/{file_id}")
+                AudioContent(
+                    type=ContentType.AUDIO,
+                    data=file_url or f"tg://file_id/{file_id}",
+                ),
             )
 
     audio = getattr(message, "audio", None)
     if audio:
         file_id = getattr(audio, "file_id", None)
         if file_id:
+            file_url = await _resolve_telegram_file_url(
+                bot=bot,
+                file_id=file_id,
+                bot_token=bot_token,
+            )
             content_parts.append(
-                AudioContent(type=ContentType.AUDIO, data=f"tg://file_id/{file_id}")
+                AudioContent(
+                    type=ContentType.AUDIO,
+                    data=file_url or f"tg://file_id/{file_id}",
+                ),
             )
 
     if not content_parts:
@@ -163,7 +228,11 @@ class TelegramChannel(BaseChannel):
         async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not update.message and not getattr(update, "edited_message", None):
                 return
-            content_parts = _build_content_parts_from_message(update)
+            content_parts = await _build_content_parts_from_message(
+                update,
+                bot=context.bot,
+                bot_token=self._bot_token,
+            )
             meta = _message_meta(update)
             chat_id = meta.get("chat_id", "")
             user = getattr(update.message or getattr(update, "edited_message"), "from_user", None)

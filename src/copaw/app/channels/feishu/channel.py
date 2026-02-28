@@ -62,6 +62,7 @@ from .utils import (
     sender_display_string,
     short_session_id_from_full_id,
 )
+from ..media_utils import classify_media_kind
 
 if TYPE_CHECKING:
     from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -509,12 +510,21 @@ class FeishuChannel(BaseChannel):
                 getattr(message, "message_type", "text") or "text",
             ).strip()
             content_raw = getattr(message, "content", None) or ""
+            content_data: Dict[str, Any] = {}
+            try:
+                parsed = json.loads(content_raw) if content_raw else {}
+                if isinstance(parsed, dict):
+                    content_data = parsed
+            except json.JSONDecodeError:
+                content_data = {}
 
             await self._add_reaction(message_id, "Typing")
 
             from agentscope_runtime.engine.schemas.agent_schemas import (
                 TextContent,
                 ImageContent,
+                AudioContent,
+                VideoContent,
                 FileContent,
             )
 
@@ -571,6 +581,64 @@ class FeishuChannel(BaseChannel):
                         text_parts.append("[file: download failed]")
                 else:
                     text_parts.append("[file: missing key]")
+            elif msg_type in ("audio", "video", "media"):
+                media_key = extract_json_key(
+                    content_raw,
+                    "file_key",
+                    "fileKey",
+                    "audio_key",
+                    "audioKey",
+                    "media_key",
+                    "mediaKey",
+                )
+                if media_key:
+                    resource_type = "audio" if msg_type == "audio" else "media"
+                    url_or_path = await self._download_file_resource(
+                        message_id,
+                        media_key,
+                        resource_type=resource_type,
+                    )
+                    if url_or_path:
+                        filename = str(
+                            content_data.get("file_name")
+                            or content_data.get("fileName")
+                            or "",
+                        ).lower()
+                        mime_type = str(
+                            content_data.get("mime_type")
+                            or content_data.get("mimeType")
+                            or "",
+                        ).lower()
+                        kind = classify_media_kind(
+                            mime_type=mime_type,
+                            filename=filename,
+                        )
+                        if msg_type == "audio" or kind == "audio":
+                            content_parts.append(
+                                AudioContent(
+                                    type=ContentType.AUDIO,
+                                    data=url_or_path,
+                                    format=mime_type or None,
+                                ),
+                            )
+                        elif msg_type == "video" or kind == "video":
+                            content_parts.append(
+                                VideoContent(
+                                    type=ContentType.VIDEO,
+                                    video_url=url_or_path,
+                                ),
+                            )
+                        else:
+                            content_parts.append(
+                                FileContent(
+                                    type=ContentType.FILE,
+                                    file_url=url_or_path,
+                                ),
+                            )
+                    else:
+                        text_parts.append(f"[{msg_type}: download failed]")
+                else:
+                    text_parts.append(f"[{msg_type}: missing key]")
             else:
                 text_parts.append(f"[{msg_type}]")
 
@@ -711,15 +779,19 @@ class FeishuChannel(BaseChannel):
         self,
         message_id: str,
         file_key: str,
+        *,
+        resource_type: str = "file",
     ) -> Optional[str]:
         """Download file to media_dir; return local path or None.
         Uses message resources API (user-sent files); /im/v1/files only
         allows app-sent files.
         """
         token = await self._get_tenant_access_token()
+        if resource_type not in {"file", "audio", "media"}:
+            resource_type = "file"
         url = (
             f"https://open.feishu.cn/open-apis/im/v1/messages/"
-            f"{message_id}/resources/{file_key}?type=file"
+            f"{message_id}/resources/{file_key}?type={resource_type}"
         )
         headers = {"Authorization": f"Bearer {token}"}
         try:

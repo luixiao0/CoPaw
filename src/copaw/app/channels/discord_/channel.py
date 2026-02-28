@@ -20,6 +20,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 from ....config.config import DiscordConfig as DiscordChannelConfig
 
 from ..base import BaseChannel, OnReplySent, ProcessHandler
+from ..media_utils import classify_media_kind
 
 logger = logging.getLogger(__name__)
 
@@ -90,46 +91,22 @@ class DiscordChannel(BaseChannel):
                         file_name = (att.filename or "").lower()
                         url = att.url
                         ctype = (att.content_type or "").lower()
-
-                        is_image = ctype.startswith(
-                            "image/",
-                        ) or file_name.endswith(
-                            (
-                                ".png",
-                                ".jpg",
-                                ".jpeg",
-                                ".gif",
-                                ".webp",
-                                ".bmp",
-                                ".tiff",
-                            ),
-                        )
-                        is_video = ctype.startswith(
-                            "video/",
-                        ) or file_name.endswith(
-                            (".mp4", ".mov", ".mkv", ".webm", ".avi"),
-                        )
-                        is_audio = ctype.startswith(
-                            "audio/",
-                        ) or file_name.endswith(
-                            (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"),
-                        )
-
-                        if is_image:
+                        kind = classify_media_kind(mime_type=ctype, filename=file_name)
+                        if kind == "image":
                             content_parts.append(
                                 ImageContent(
                                     type=ContentType.IMAGE,
                                     image_url=url,
                                 ),
                             )
-                        elif is_video:
+                        elif kind == "video":
                             content_parts.append(
                                 VideoContent(
                                     type=ContentType.VIDEO,
                                     video_url=url,
                                 ),
                             )
-                        elif is_audio:
+                        elif kind == "audio":
                             content_parts.append(
                                 AudioContent(
                                     type=ContentType.AUDIO,
