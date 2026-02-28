@@ -581,6 +581,14 @@ class FeishuChannel(BaseChannel):
                         text_parts.append("[file: download failed]")
                 else:
                     text_parts.append("[file: missing key]")
+            elif msg_type == "post":
+                await self._parse_post_content(
+                    content_data,
+                    message_id,
+                    text_parts,
+                    content_parts,
+                    ImageContent,
+                )
             elif msg_type in ("audio", "video", "media"):
                 media_key = extract_json_key(
                     content_raw,
@@ -731,6 +739,93 @@ class FeishuChannel(BaseChannel):
                 )
         except Exception as e:
             logger.debug("feishu reaction error: %s", e)
+
+    async def _parse_post_content(
+        self,
+        content_data: Dict[str, Any],
+        message_id: str,
+        text_parts: List[str],
+        content_parts: List[Any],
+        ImageContent: type,
+    ) -> None:
+        """Parse Feishu post (rich text) message into text + image parts.
+
+        Post structure: {"zh_cn": {"title": "...", "content": [[blocks]]}}
+        Each block has {"tag": "text", "text": "..."} or {"tag": "img", "image_key": "..."} etc.
+        """
+        post_body = None
+        for lang_key in ("zh_cn", "en_us", "ja_jp"):
+            if lang_key in content_data:
+                post_body = content_data[lang_key]
+                break
+        if not post_body and content_data:
+            first_val = next(iter(content_data.values()), None)
+            if isinstance(first_val, dict):
+                post_body = first_val
+
+        if not isinstance(post_body, dict):
+            text_parts.append("[post: unrecognized format]")
+            return
+
+        title = (post_body.get("title") or "").strip()
+        if title:
+            text_parts.append(title)
+
+        paragraphs = post_body.get("content")
+        if not isinstance(paragraphs, list):
+            return
+
+        for paragraph in paragraphs:
+            if not isinstance(paragraph, list):
+                continue
+            line_texts: List[str] = []
+            for block in paragraph:
+                if not isinstance(block, dict):
+                    continue
+                tag = block.get("tag", "")
+                if tag == "text":
+                    t = (block.get("text") or "").strip()
+                    if t:
+                        line_texts.append(t)
+                elif tag == "a":
+                    link_text = (block.get("text") or "").strip()
+                    href = (block.get("href") or "").strip()
+                    if link_text and href:
+                        line_texts.append(f"[{link_text}]({href})")
+                    elif link_text:
+                        line_texts.append(link_text)
+                    elif href:
+                        line_texts.append(href)
+                elif tag == "at":
+                    name = (block.get("user_name") or "").strip()
+                    if name:
+                        line_texts.append(f"@{name}")
+                elif tag == "img":
+                    image_key = (block.get("image_key") or "").strip()
+                    if image_key:
+                        url_or_path = await self._download_image_resource(
+                            message_id,
+                            image_key,
+                        )
+                        if url_or_path:
+                            content_parts.append(
+                                ImageContent(
+                                    type=ContentType.IMAGE,
+                                    image_url=url_or_path,
+                                ),
+                            )
+                        else:
+                            line_texts.append("[image: download failed]")
+                elif tag == "media":
+                    file_key = (block.get("file_key") or "").strip()
+                    if file_key:
+                        line_texts.append(f"[media: {file_key}]")
+                elif tag == "emotion":
+                    emoji = (block.get("emoji_type") or "").strip()
+                    if emoji:
+                        line_texts.append(f"[{emoji}]")
+            if line_texts:
+                text_parts.append(" ".join(line_texts))
 
     async def _download_image_resource(
         self,
