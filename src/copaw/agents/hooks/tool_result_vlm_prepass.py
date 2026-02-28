@@ -47,11 +47,17 @@ def _extract_text_from_content(content: list) -> str:
     return "".join(parts)
 
 
+_SKIP_VLM_TOOLS: set[str] = {
+    "send_file_to_user",
+    "send_message_to_user",
+}
+
+
 class ToolResultVLMPrepassHook:
     """Run VLM prepass on images embedded in tool-result memory entries."""
 
     def __init__(self) -> None:
-        self._processed_msg_ids: set[str] = set()
+        self._processed: set[tuple[str, int]] = set()
         self._running = False
 
     async def __call__(
@@ -95,20 +101,22 @@ class ToolResultVLMPrepassHook:
     def _collect_unprocessed(
         self,
         agent: Any,
-    ) -> list[tuple[Msg, dict, list[dict]]]:
+    ) -> list[tuple[Msg, dict, list[dict], int]]:
         """Find tool_result blocks in memory that contain image outputs."""
         entries = getattr(agent.memory, "content", None)
         if not entries:
             return []
 
-        items: list[tuple[Msg, dict, list[dict]]] = []
+        items: list[tuple[Msg, dict, list[dict], int]] = []
         for entry in entries:
             msg = entry[0] if isinstance(entry, tuple) else entry
-            if not isinstance(msg, Msg) or msg.id in self._processed_msg_ids:
+            if not isinstance(msg, Msg):
                 continue
             if not isinstance(msg.content, list):
                 continue
-            for block in msg.content:
+            for idx, block in enumerate(msg.content):
+                if (msg.id, idx) in self._processed:
+                    continue
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") != "tool_result":
@@ -122,7 +130,7 @@ class ToolResultVLMPrepassHook:
                     if isinstance(b, dict) and b.get("type") == "image"
                 ]
                 if img_blocks:
-                    items.append((msg, block, img_blocks))
+                    items.append((msg, block, img_blocks, idx))
         return items
 
     # ------------------------------------------------------------------
@@ -132,10 +140,14 @@ class ToolResultVLMPrepassHook:
     async def _process_items(
         self,
         agent: Any,
-        items: list[tuple[Msg, dict, list[dict]]],
+        items: list[tuple[Msg, dict, list[dict], int]],
     ) -> None:
-        for msg, tool_result_block, image_blocks in items:
+        for msg, tool_result_block, image_blocks, block_idx in items:
             tool_name = tool_result_block.get("name", "unknown_tool")
+            if tool_name in _SKIP_VLM_TOOLS:
+                self._strip_image_blocks(tool_result_block)
+                self._processed.add((msg.id, block_idx))
+                continue
             description: str | None = None
             try:
                 description = await self._describe_images(
@@ -151,7 +163,7 @@ class ToolResultVLMPrepassHook:
                 )
 
             self._replace_image_blocks(tool_result_block, description)
-            self._processed_msg_ids.add(msg.id)
+            self._processed.add((msg.id, block_idx))
 
     async def _describe_images(
         self,
@@ -215,7 +227,7 @@ class ToolResultVLMPrepassHook:
 
         vision_settings = getattr(agent, "_vision_settings", None)
         image_settings = getattr(vision_settings, "image", None)
-        timeout_seconds = getattr(image_settings, "timeout_seconds", 30)
+        timeout_seconds = getattr(image_settings, "timeout_seconds", 120)
         max_output_chars = getattr(image_settings, "max_output_chars", 2000)
 
         vlm_model = agent._vlm_model
@@ -293,6 +305,16 @@ class ToolResultVLMPrepassHook:
     # ------------------------------------------------------------------
     # Memory mutation
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _strip_image_blocks(tool_result_block: dict) -> None:
+        """Remove image blocks from tool result (no VLM description needed)."""
+        output = tool_result_block.get("output", [])
+        if isinstance(output, list):
+            tool_result_block["output"] = [
+                b for b in output
+                if not (isinstance(b, dict) and b.get("type") == "image")
+            ]
 
     @staticmethod
     def _replace_image_blocks(

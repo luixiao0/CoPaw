@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from pathlib import Path
@@ -32,6 +33,10 @@ from .registry import (
     unregister_custom_provider,
     validate_custom_provider_id,
 )
+
+# Cache for OpenAI-compatible /v1/models responses (key: (base_url, normalized_api_key)).
+MODELS_CACHE_TTL_SEC = 600
+_openai_models_cache: dict[tuple[str, str], tuple[list[ModelInfo], float]] = {}
 
 _PROVIDERS_DIR = Path(__file__).resolve().parent
 _PROVIDERS_JSON = _PROVIDERS_DIR / "providers.json"
@@ -86,9 +91,12 @@ def _fetch_openai_models(
     api_key: str,
     *,
     provider_id: str = "",
+    use_cache: bool = True,
 ) -> list[ModelInfo]:
     """Fetch model list from OpenAI-compatible endpoint.
 
+    Results are cached for MODELS_CACHE_TTL_SEC (600s) per (base_url, api_key).
+    Pass use_cache=False to force a fresh fetch (e.g. after saving provider config).
     Returns an empty list if fetching/parsing fails.
     """
     endpoint = _build_models_url(base_url)
@@ -96,6 +104,12 @@ def _fetch_openai_models(
         return []
 
     normalized_key = _normalize_api_key(api_key)
+    cache_key = (base_url.strip().rstrip("/"), normalized_key)
+    if use_cache:
+        entry = _openai_models_cache.get(cache_key)
+        if entry is not None and time.monotonic() <= entry[1]:
+            return list(entry[0])
+
     headers = {"Accept": "application/json"}
     if normalized_key:
         headers["Authorization"] = f"Bearer {normalized_key}"
@@ -134,6 +148,12 @@ def _fetch_openai_models(
             continue
         seen.add(mid)
         models.append(ModelInfo(id=mid, name=mid))
+
+    if use_cache:
+        _openai_models_cache[cache_key] = (
+            models,
+            time.monotonic() + MODELS_CACHE_TTL_SEC,
+        )
     return models
 
 
@@ -444,6 +464,7 @@ def update_provider_settings(
             cpd.base_url,
             cpd.api_key,
             provider_id=provider_id,
+            use_cache=False,
         )
         if fetched_models:
             cpd.models = fetched_models
@@ -715,6 +736,7 @@ def create_custom_provider(
         cpd.base_url,
         cpd.api_key,
         provider_id=provider_id,
+        use_cache=False,
     )
     if fetched_models:
         cpd.models = fetched_models

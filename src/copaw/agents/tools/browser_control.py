@@ -495,6 +495,7 @@ _MUTATING_ACTIONS: set[str] = {
     "open", "navigate", "navigate_back", "click", "click_at",
     "type", "press_key", "select_option", "fill_form",
     "hover", "drag", "handle_dialog", "wait_for",
+    "eval", "evaluate", "scroll",
 }
 
 # Max chars for the auto-appended snapshot text.
@@ -643,14 +644,17 @@ async def browser_use(  # pylint: disable=R0911,R0912
 
     ## Key behaviors
 
-    - Actions that change page state (click, type, navigate, etc.) automatically
-      return an updated accessibility snapshot of interactive elements. You do NOT
-      need to call snapshot after every action.
-    - Use snapshot() only when you need the FULL tree or to refresh refs.
-    - Use screenshot() when you need VISUAL content (images, colors, layout).
-      With ref (e.g. screenshot(ref="e73")), it scrolls to the element and captures
-      the viewport, showing the element AND its surrounding context (what's above,
-      below, next to it). Without ref, captures the current viewport.
+    - Actions that change page state (click, type, navigate, eval, etc.)
+      automatically return an updated accessibility snapshot.
+      No need to call snapshot after every action. Use the auto-snapshot to
+      understand page structure, available elements, and text content.
+    - FAST path: snapshot/auto-snapshot (text tree, instant). Use this for
+      navigation, finding elements, reading text content, checking structure.
+    - SLOW path: screenshot (triggers vision analysis, takes 10-30s). Use
+      when you need VISUAL content like images, thumbnails,
+      colors, or visual layout that the text snapshot cannot provide.
+    - With ref (e.g. screenshot(ref="e73")), screenshot scrolls to the
+      element and captures the viewport with surrounding context.
     - Target elements by ref (from snapshot), e.g. click(ref="e5"). Prefer ref over selector.
 
     ## Actions
