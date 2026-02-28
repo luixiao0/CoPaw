@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CoPaw Installer
 # Usage: curl -fsSL <url>/install.sh | bash
-#    or: bash install.sh [--version X.Y.Z] [--from-source]
+#    or: bash install.sh [--version X.Y.Z] [--from-source] [--repo URL]
 #
 # Installs CoPaw into ~/.copaw with a uv-managed Python environment.
 # Users do NOT need Python pre-installed — uv handles everything.
@@ -12,7 +12,7 @@ COPAW_HOME="${COPAW_HOME:-$HOME/.copaw}"
 COPAW_VENV="$COPAW_HOME/venv"
 COPAW_BIN="$COPAW_HOME/bin"
 PYTHON_VERSION="3.12"
-COPAW_REPO="https://github.com/agentscope-ai/CoPaw.git"
+COPAW_REPO="${COPAW_REPO:-https://github.com/agentscope-ai/CoPaw.git}"
 
 VERSION=""
 FROM_SOURCE=false
@@ -50,6 +50,8 @@ while [[ $# -gt 0 ]]; do
             shift ;;
         --extras)
             EXTRAS="$2"; shift 2 ;;
+        --repo)
+            COPAW_REPO="$2"; shift 2 ;;
         -h|--help)
             cat <<EOF
 CoPaw Installer
@@ -62,10 +64,13 @@ Options:
                         directory; otherwise clone from GitHub.
   --extras <EXTRAS>     Comma-separated optional extras to install
                         (e.g. llamacpp, mlx, llamacpp,mlx)
+  --repo <URL>          Source repository URL used with --from-source
+                        (default: https://github.com/agentscope-ai/CoPaw.git)
   -h, --help            Show this help
 
 Environment:
   COPAW_HOME        Installation directory (default: ~/.copaw)
+  COPAW_REPO        Override source repository URL used with --from-source
 EOF
             exit 0 ;;
         *)
@@ -202,7 +207,7 @@ if [ "$FROM_SOURCE" = true ]; then
         uv pip install "${SOURCE_DIR}${EXTRAS_SUFFIX}" --python "$COPAW_VENV/bin/python" --prerelease=allow
         cleanup_console "$SOURCE_DIR"
     else
-        info "Installing CoPaw from source (GitHub)..."
+        info "Installing CoPaw from source repository: $COPAW_REPO"
         CLONE_DIR="$(mktemp -d)"
         trap 'rm -rf "$CLONE_DIR"' EXIT
         git clone --depth 1 "$COPAW_REPO" "$CLONE_DIR"

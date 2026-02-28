@@ -121,6 +121,10 @@ curl -fsSL ... | bash -s -- --version 0.0.2
 # 从源码安装（开发/测试用）
 curl -fsSL ... | bash -s -- --from-source
 
+# 从你的 fork 仓库安装
+curl -fsSL ... | bash -s -- --from-source --repo https://github.com/<you>/CoPaw.git
+COPAW_REPO=https://github.com/<you>/CoPaw.git curl -fsSL ... | bash -s -- --from-source
+
 # 安装本地模型支持
 bash install.sh --extras llamacpp    # llama.cpp（跨平台）
 bash install.sh --extras mlx         # MLX（Apple Silicon）
@@ -142,6 +146,10 @@ irm ... | iex; .\install.ps1 -Version 0.0.2
 
 # 从源码安装（开发/测试用）
 .\install.ps1 -FromSource
+
+# 从你的 fork 仓库安装
+.\install.ps1 -FromSource -Repo https://github.com/<you>/CoPaw.git
+$env:COPAW_REPO="https://github.com/<you>/CoPaw.git"; .\install.ps1 -FromSource
 
 # 安装本地模型支持
 .\install.ps1 -Extras llamacpp      # llama.cpp（跨平台）
@@ -243,6 +251,8 @@ git clone https://github.com/agentscope-ai/CoPaw.git
 cd CoPaw
 pip install -e .
 ```
+
+如果你使用的是 fork，请把上面的仓库地址替换为你自己的仓库地址。
 
 - **开发**（测试、格式化）：`pip install -e ".[dev]"`
 - **控制台**（构建前端）：在项目根目录执行 `cd console && npm ci && npm run build`，再运行 `copaw app`。

@@ -121,6 +121,10 @@ curl -fsSL ... | bash -s -- --version 0.0.2
 # Install from source (dev/testing)
 curl -fsSL ... | bash -s -- --from-source
 
+# Install from your fork repository
+curl -fsSL ... | bash -s -- --from-source --repo https://github.com/<you>/CoPaw.git
+COPAW_REPO=https://github.com/<you>/CoPaw.git curl -fsSL ... | bash -s -- --from-source
+
 # With local model support
 bash install.sh --extras llamacpp    # llama.cpp (cross-platform)
 bash install.sh --extras mlx         # MLX (Apple Silicon)
@@ -142,6 +146,10 @@ irm ... | iex; .\install.ps1 -Version 0.0.2
 
 # Install from source (dev/testing)
 .\install.ps1 -FromSource
+
+# Install from your fork repository
+.\install.ps1 -FromSource -Repo https://github.com/<you>/CoPaw.git
+$env:COPAW_REPO="https://github.com/<you>/CoPaw.git"; .\install.ps1 -FromSource
 
 # With local model support
 .\install.ps1 -Extras llamacpp      # llama.cpp (cross-platform)
@@ -241,6 +249,8 @@ git clone https://github.com/agentscope-ai/CoPaw.git
 cd CoPaw
 pip install -e .
 ```
+
+For forks, replace the clone URL with your own repository.
 
 - **Dev** (tests, formatting): `pip install -e ".[dev]"`
 - **Console** (build frontend): `cd console && npm ci && npm run build`, then `copaw app` from project root.

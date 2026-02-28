@@ -1,6 +1,6 @@
 # CoPaw Installer for Windows
 # Usage: irm <url>/install.ps1 | iex
-#    or: .\install.ps1 [-Version X.Y.Z] [-FromSource [DIR]] [-Extras "llamacpp,mlx"]
+#    or: .\install.ps1 [-Version X.Y.Z] [-FromSource [DIR]] [-Extras "llamacpp,mlx"] [-Repo <URL>]
 #
 # Installs CoPaw into ~/.copaw with a uv-managed Python environment.
 # Users do NOT need Python pre-installed — uv handles everything.
@@ -14,6 +14,7 @@ param(
     [switch]$FromSource,
     [string]$SourceDir = "",
     [string]$Extras = "",
+    [string]$Repo = "",
     [switch]$Help
 )
 
@@ -24,7 +25,13 @@ $CopawHome = if ($env:COPAW_HOME) { $env:COPAW_HOME } else { Join-Path $HOME ".c
 $CopawVenv = Join-Path $CopawHome "venv"
 $CopawBin = Join-Path $CopawHome "bin"
 $PythonVersion = "3.12"
-$CopawRepo = "https://github.com/agentscope-ai/CoPaw.git"
+$CopawRepo = if ($Repo) {
+    $Repo
+} elseif ($env:COPAW_REPO) {
+    $env:COPAW_REPO
+} else {
+    "https://github.com/agentscope-ai/CoPaw.git"
+}
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 function Write-Info { param([string]$Message) Write-Host "[copaw] " -ForegroundColor Green -NoNewline; Write-Host $Message }
@@ -45,10 +52,13 @@ Options:
                         directory; otherwise clone from GitHub.
   -Extras <EXTRAS>      Comma-separated optional extras to install
                         (e.g. llamacpp, mlx, llamacpp,mlx)
+  -Repo <URL>           Source repository URL used with -FromSource
+                        (default: https://github.com/agentscope-ai/CoPaw.git)
   -Help                 Show this help
 
 Environment:
   COPAW_HOME            Installation directory (default: ~/.copaw)
+  COPAW_REPO            Override source repository URL used with -FromSource
 "@
     exit 0
 }
@@ -229,7 +239,7 @@ if ($FromSource) {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
             Stop-WithError "git is required for -FromSource without a local directory. Please install Git from https://git-scm.com/ or pass a local path: .\install.ps1 -FromSource -SourceDir C:\path\to\CoPaw"
         }
-        Write-Info "Installing CoPaw from source (GitHub)..."
+        Write-Info "Installing CoPaw from source repository: $CopawRepo"
         $cloneDir = Join-Path $env:TEMP "copaw-install-$(Get-Random)"
         try {
             git clone --depth 1 $CopawRepo $cloneDir
