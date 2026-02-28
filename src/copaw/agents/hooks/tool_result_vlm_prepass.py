@@ -9,7 +9,10 @@ blocks with the textual description so the text-only LLM can reason about
 the visual content.
 """
 import asyncio
+import base64
 import logging
+import time
+from pathlib import Path
 from typing import Any
 
 from agentscope.message import Msg
@@ -159,24 +162,29 @@ class ToolResultVLMPrepassHook:
         resolved = _resolve_image_blocks_to_base64(image_blocks)
 
         if tool_name == "browser_use":
-            prompt_text = (
+            resolved, labeled = await self._try_labeled_screenshot(resolved)
+            base_prompt = (
                 "You are a vision preprocessor for a browser screenshot.\n"
-                "The structural information (text content, links, buttons, "
-                "roles) is ALREADY available from the accessibility tree. "
+                "The structural information (text, links, buttons) is "
+                "ALREADY available from the accessibility tree. "
                 "Do NOT repeat it.\n"
-                "Focus ONLY on visual details the accessibility tree cannot "
-                "provide:\n"
+                "Focus ONLY on visual details:\n"
                 "- Image/thumbnail/video cover content (what is depicted)\n"
-                "- Colors, icons, visual indicators (progress bars, status "
-                "dots)\n"
+                "- Colors, icons, visual indicators\n"
                 "- Spatial layout and relative positioning of elements\n"
-                "- Any visual-only UI state (hover effects, highlighted "
-                "tabs, etc.)\n"
-                "If elements have ref labels (e.g., e57), use them to "
-                "reference elements.\n"
+                "- Any visual-only UI state (hover effects, highlights)\n"
                 "Be concise. Skip elements where text labels already "
                 "describe the content."
             )
+            if labeled:
+                prompt_text = (
+                    base_prompt + "\n"
+                    "The screenshot has orange ref labels (e.g. e57) overlaid "
+                    "on elements. Use these refs when describing visual "
+                    "content so it can be matched to the accessibility tree."
+                )
+            else:
+                prompt_text = base_prompt
         else:
             prompt_text = (
                 "You are a vision preprocessor. "
@@ -208,7 +216,7 @@ class ToolResultVLMPrepassHook:
         vision_settings = getattr(agent, "_vision_settings", None)
         image_settings = getattr(vision_settings, "image", None)
         timeout_seconds = getattr(image_settings, "timeout_seconds", 30)
-        max_output_chars = getattr(image_settings, "max_output_chars", 500)
+        max_output_chars = getattr(image_settings, "max_output_chars", 2000)
 
         vlm_model = agent._vlm_model
         response = await asyncio.wait_for(
@@ -244,6 +252,45 @@ class ToolResultVLMPrepassHook:
         return text
 
     # ------------------------------------------------------------------
+    # Browser label overlay
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _try_labeled_screenshot(
+        resolved: list[dict],
+    ) -> tuple[list[dict], bool]:
+        """Replace browser screenshot with a labeled version if possible.
+
+        Returns (image_blocks, was_labeled).
+        """
+        try:
+            from ..tools.browser_control import get_labeled_screenshot
+
+            img_bytes = await get_labeled_screenshot()
+            if img_bytes is None:
+                return resolved, False
+
+            debug_dir = Path("downloads") / "vlm_debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = debug_dir / f"vlm_labeled_{int(time.time())}.png"
+            debug_path.write_bytes(img_bytes)
+            logger.info("VLM labeled screenshot saved: %s", debug_path)
+
+            b64 = base64.b64encode(img_bytes).decode("ascii")
+            labeled_block = {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": b64,
+                },
+            }
+            return [labeled_block], True
+        except Exception as exc:
+            logger.debug("Labeled screenshot unavailable: %s", exc)
+            return resolved, False
+
+    # ------------------------------------------------------------------
     # Memory mutation
     # ------------------------------------------------------------------
 
@@ -264,12 +311,19 @@ class ToolResultVLMPrepassHook:
             new_output.append(block)
 
         if description:
+            caveat = (
+                "Note: This is a summary. For questions about specific "
+                "visual details or spatial positions (e.g. what is above/"
+                "below a particular element), take a targeted screenshot "
+                "of that area using action=screenshot with ref=<element>."
+            )
             new_output.append(
                 {
                     "type": "text",
                     "text": (
                         "\n[Image Description (from vision model)]\n"
                         f"{description}\n"
+                        f"{caveat}\n"
                         "[/Image Description]"
                     ),
                 },

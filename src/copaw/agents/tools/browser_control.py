@@ -532,6 +532,7 @@ async def _auto_snapshot_text(
                 "snapshot": snapshot,
                 "refs": ref_list,
                 "url": page.url,
+                "note": "Text-only structure. Use action=screenshot to see visual content.",
             },
             ensure_ascii=False,
             indent=2,
@@ -637,7 +638,7 @@ async def browser_use(  # pylint: disable=R0911,R0912
 
     BROWSE: start(headed=True) -> open(url) -> read auto-snapshot -> click(ref) -> read auto-snapshot -> ...
     NAVIGATE: navigate(url) to go to a new URL on an existing page (open creates the first page)
-    VISUAL: screenshot(path) -> (VLM auto-describes if configured) -> reason about visual content
+    VISUAL: screenshot(ref, path) -> scrolls to element, captures viewport with context -> VLM auto-describes
     FIND:   snapshot() -> search for ref in tree -> click(ref)
 
     ## Key behaviors
@@ -646,10 +647,10 @@ async def browser_use(  # pylint: disable=R0911,R0912
       return an updated accessibility snapshot of interactive elements. You do NOT
       need to call snapshot after every action.
     - Use snapshot() only when you need the FULL tree or to refresh refs.
-    - Use screenshot() only when you need VISUAL content (images, colors, layout)
-      that the text snapshot cannot provide.
-    - Use snapshot(labels=True) to get a labeled screenshot with ref bounding boxes
-      overlaid, useful for visual grounding.
+    - Use screenshot() when you need VISUAL content (images, colors, layout).
+      With ref (e.g. screenshot(ref="e73")), it scrolls to the element and captures
+      the viewport, showing the element AND its surrounding context (what's above,
+      below, next to it). Without ref, captures the current viewport.
     - Target elements by ref (from snapshot), e.g. click(ref="e5"). Prefer ref over selector.
 
     ## Actions
@@ -674,7 +675,6 @@ async def browser_use(  # pylint: disable=R0911,R0912
     path (str): For screenshot, pdf. File path to save.
     selector (str): CSS selector fallback when ref unavailable.
     x, y (int): For click_at. Viewport coordinates.
-    labels (bool): For snapshot. Overlay ref labels on screenshot.
     headed (bool): For start. True = visible browser window.
     user_data_dir (str): For start. Chrome profile path or "auto".
     channel (str): For start. "chrome", "msedge", or "auto".
@@ -920,6 +920,8 @@ def _get_locator_by_ref(
     locator = root.get_by_role(role, name=name or None)
     if nth is not None and nth > 0:
         locator = locator.nth(nth)
+    else:
+        locator = locator.first
     return locator
 
 
@@ -1355,7 +1357,11 @@ async def _action_screenshot(
                         indent=2,
                     ),
                 )
-            await locator.screenshot(
+            await locator.evaluate(
+                'el => el.scrollIntoView({block:"center",inline:"center"})',
+            )
+            await page.wait_for_timeout(300)
+            await page.screenshot(
                 path=path,
                 type=screenshot_type if screenshot_type == "jpeg" else "png",
             )
@@ -1788,6 +1794,8 @@ _JS_REMOVE_LABELS = """
 }
 """
 
+_BBOX_TIMEOUT_MS = 200
+
 
 async def _overlay_labels_and_screenshot(
     page,
@@ -1797,6 +1805,7 @@ async def _overlay_labels_and_screenshot(
 ) -> tuple[bytes, int, int]:
     """Overlay ref bounding-box labels on page, screenshot, then remove.
 
+    Uses Playwright's native locator resolution with short timeouts.
     Returns (screenshot_bytes, labels_drawn, labels_skipped).
     """
     viewport = await page.evaluate(
@@ -1807,10 +1816,8 @@ async def _overlay_labels_and_screenshot(
         "height: window.innerHeight || 0"
         "})",
     )
-    vx0 = viewport["scrollX"]
-    vy0 = viewport["scrollY"]
-    vx1 = vx0 + viewport["width"]
-    vy1 = vy0 + viewport["height"]
+    sx, sy = viewport["scrollX"], viewport["scrollY"]
+    vw, vh = viewport["width"], viewport["height"]
 
     boxes: list[dict] = []
     skipped = 0
@@ -1823,24 +1830,21 @@ async def _overlay_labels_and_screenshot(
             skipped += 1
             continue
         try:
-            box = await locator.bounding_box()
+            box = await locator.bounding_box(timeout=_BBOX_TIMEOUT_MS)
         except Exception:
             skipped += 1
             continue
         if box is None:
             skipped += 1
             continue
-        x0, y0 = box["x"], box["y"]
-        x1, y1 = x0 + box["width"], y0 + box["height"]
-        if x1 < vx0 or x0 > vx1 or y1 < vy0 or y0 > vy1:
+        x, y, w, h = box["x"], box["y"], box["width"], box["height"]
+        if x + w < sx or x > sx + vw or y + h < sy or y > sy + vh:
             skipped += 1
             continue
         boxes.append({
             "ref": ref,
-            "x": x0 - viewport["scrollX"],
-            "y": y0 - viewport["scrollY"],
-            "w": max(1, box["width"]),
-            "h": max(1, box["height"]),
+            "x": x - sx, "y": y - sy,
+            "w": max(1, w), "h": max(1, h),
         })
 
     try:
@@ -1853,6 +1857,35 @@ async def _overlay_labels_and_screenshot(
             await page.evaluate(_JS_REMOVE_LABELS)
         except Exception:
             pass
+
+
+async def get_labeled_screenshot() -> bytes | None:
+    """Take a viewport screenshot with ref label overlays.
+
+    Returns PNG bytes, or None if no browser/page/refs are available.
+    Called by VLM prepass to provide grounded visual descriptions.
+    """
+    page_id = _state.get("current_page_id")
+    if not page_id:
+        return None
+    page = _get_page(page_id)
+    if not page:
+        return None
+    refs = _get_refs(page_id)
+    if not refs:
+        return None
+    frame_selector = _state.get("refs_frame", {}).get(page_id, "")
+    try:
+        img_bytes, drawn, _ = await _overlay_labels_and_screenshot(
+            page, refs, page_id, frame_selector,
+        )
+        if drawn == 0:
+            return None
+        logger.debug("Labeled screenshot: %d refs drawn", drawn)
+        return img_bytes
+    except Exception as exc:
+        logger.debug("get_labeled_screenshot failed: %s", exc)
+        return None
 
 
 async def _action_snapshot(
@@ -1889,6 +1922,7 @@ async def _action_snapshot(
             "snapshot": snapshot,
             "refs": list(refs.keys()),
             "url": page.url,
+            "note": "This is the text accessibility tree. To see VISUAL content (images, colors, thumbnails), use action=screenshot instead.",
         }
         if frame_selector and frame_selector.strip():
             out["frame_selector"] = frame_selector.strip()
