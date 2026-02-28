@@ -325,8 +325,12 @@ class CoPawAgent(ReActAgent):
         # LLM does not support vision. VLM output is treated as auxiliary
         # context and then handed back to LLM for final task completion.
         if self._should_route_to_vlm(msg):
-            analysis = await self._run_vlm_prepass(msg)
-            msg = self._inject_vlm_analysis_for_llm(msg, analysis)
+            try:
+                analysis = await self._run_vlm_prepass(msg)
+                msg = self._inject_vlm_analysis_for_llm(msg, analysis)
+            except Exception as e:
+                logger.warning("VLM prepass failed; continue with degraded context: %s", e)
+                msg = self._inject_vlm_failure_for_llm(msg, str(e))
 
         # Normal message processing (or no VLM configured)
         return await super().reply(msg=msg, structured_model=structured_model)
@@ -386,6 +390,7 @@ class CoPawAgent(ReActAgent):
                 runtime_model,
                 msg=vlm_msg,
                 structured_model=None,
+                persist_to_memory=False,
             )
             analysis = prepass_reply.get_text_content()
             if not analysis:
@@ -410,11 +415,16 @@ class CoPawAgent(ReActAgent):
         ]
         user_text = source.get_text_content() or ""
         prompt = (
-            "You are a vision analysis helper. Analyze the provided images "
-            "for the current user task.\n"
-            "Return factual observations, visible text, key entities, and "
-            "possible ambiguities. Do NOT provide the final assistant answer.\n\n"
-            f"User request:\n{user_text}"
+            "You are a vision preprocessor for a stronger text-only planner.\n"
+            "Analyze the provided images and return structured notes only.\n"
+            "Do NOT answer the user directly and do NOT invent unseen details.\n\n"
+            "Required output sections:\n"
+            "1) OCR text\n"
+            "2) Key objects/entities\n"
+            "3) Spatial/layout cues relevant to task\n"
+            "4) Confidence and ambiguities\n"
+            "5) Suggested follow-up checks for the planner\n\n"
+            f"User task:\n{user_text}"
         )
         content = [TextBlock(type="text", text=prompt), *image_blocks]
         return Msg(name=source.name, role="user", content=content)
@@ -443,9 +453,9 @@ class CoPawAgent(ReActAgent):
         analysis_block = TextBlock(
             type="text",
             text=(
-                "[Vision analysis from helper model]\n"
+                "[VisionPrepass]\n"
                 f"{analysis}\n"
-                "[End vision analysis]"
+                "[/VisionPrepass]"
             ),
         )
 
@@ -468,14 +478,47 @@ class CoPawAgent(ReActAgent):
             target.content = [analysis_block]
         return msg
 
+    def _inject_vlm_failure_for_llm(
+        self,
+        msg: Msg | list[Msg] | None,
+        error_text: str,
+    ) -> Msg | list[Msg] | None:
+        """Inject graceful degradation note when VLM prepass fails."""
+        target = self._get_last_message(msg)
+        if isinstance(target.content, list):
+            filtered = [
+                block
+                for block in target.content
+                if not (
+                    isinstance(block, dict) and block.get("type") == "image"
+                )
+            ]
+            filtered.append(
+                TextBlock(
+                    type="text",
+                    text=(
+                        "[VisionPrepassFailed]\n"
+                        "Image analysis is unavailable for this turn. "
+                        "Proceed with best-effort text-only reasoning and "
+                        "state visual uncertainty explicitly.\n"
+                        f"Reason: {error_text}\n"
+                        "[/VisionPrepassFailed]"
+                    ),
+                ),
+            )
+            target.content = filtered
+        return msg
+
     async def _reply_with_runtime_model(
         self,
         runtime_model,
         msg: Msg | list[Msg] | None,
         structured_model: Type[BaseModel] | None,
+        persist_to_memory: bool = True,
     ) -> Msg:
         original_model = self.model
         old_memory_chat_model = None
+        original_memory_len = len(self.memory.content)
         if self.memory_manager is not None:
             old_memory_chat_model = self.memory_manager.chat_model
 
@@ -485,6 +528,8 @@ class CoPawAgent(ReActAgent):
         try:
             return await super().reply(msg=msg, structured_model=structured_model)
         finally:
+            if not persist_to_memory and len(self.memory.content) > original_memory_len:
+                self.memory.content = self.memory.content[:original_memory_len]
             self.model = original_model
             if self.memory_manager is not None:
                 self.memory_manager.chat_model = old_memory_chat_model
