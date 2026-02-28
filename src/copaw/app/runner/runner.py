@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=unused-argument too-many-branches too-many-statements
 import asyncio
+import copy
 import json
 import logging
 from pathlib import Path
@@ -20,6 +21,27 @@ from ...config import load_config
 from ...constant import WORKING_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _compact_tool_blocks_in_content(content):
+    """Replace tool_use and tool_result blocks with short text for compact display."""
+    if not isinstance(content, list):
+        return content
+    out = []
+    for block in content:
+        if not isinstance(block, dict):
+            out.append(block)
+            continue
+        btype = block.get("type")
+        if btype == "tool_use":
+            name = block.get("name", "tool")
+            out.append({"type": "text", "text": f"🔧 **{name}** …"})
+        elif btype == "tool_result":
+            name = block.get("name", "tool")
+            out.append({"type": "text", "text": f"✅ **{name}**"})
+        else:
+            out.append(block)
+    return out
 
 
 class AgentRunner(Runner):
@@ -137,10 +159,25 @@ class AgentRunner(Runner):
             # in the session state.
             agent.rebuild_sys_prompt()
 
+            # Verbosity: from request meta (e.g. Web UI display.verbosity) or config
+            meta = getattr(request, "meta", None) or getattr(
+                request, "channel_meta", None
+            ) or {}
+            show_tool_details = meta.get("show_tool_details")
+            if show_tool_details is None and hasattr(config, "show_tool_details"):
+                show_tool_details = config.show_tool_details
+            if show_tool_details is None:
+                show_tool_details = True
+
             async for msg, last in stream_printing_messages(
                 agents=[agent],
                 coroutine_task=agent(msgs),
             ):
+                if not show_tool_details and getattr(msg, "content", None):
+                    compact_content = _compact_tool_blocks_in_content(msg.content)
+                    if compact_content is not msg.content:
+                        msg = copy.copy(msg)
+                        msg.content = compact_content
                 yield msg, last
 
         except asyncio.CancelledError:

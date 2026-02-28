@@ -1,0 +1,165 @@
+diff --git a/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Chat/Input/index.js b/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Chat/Input/index.js
+index be65bdf..e0c0627 100644
+--- a/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Chat/Input/index.js
++++ b/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Chat/Input/index.js
+@@ -86,6 +86,11 @@ export default function Input(props) {
+   var handleCancel = useCallback(function () {
+     props.onCancel();
+   }, []);
++  var fileListWithUrl = (getFileList && getFileList() || []).filter(function (i) {
++    return i && i.response && i.response.url;
++  });
++  var hasContent = (content && content.trim()) || fileListWithUrl.length > 0;
++  var sendDisabled = !hasContent;
+   return /*#__PURE__*/_jsxs("div", {
+     className: prefixCls,
+     children: [/*#__PURE__*/_jsxs("div", {
+@@ -96,6 +101,7 @@ export default function Input(props) {
+         scalable: scalable,
+         placeholder: placeholder,
+         value: content,
++        sendDisabled: sendDisabled,
+         prefix: /*#__PURE__*/_jsx(_Fragment, {
+           children: uploadIconButton
+         }),
+diff --git a/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.js b/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.js
+index 80c3522..6d966ab 100644
+--- a/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.js
++++ b/node_modules/@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.js
+@@ -31,7 +31,9 @@ export var ChatAnywhereSessionsContext = createContext({
+   setCurrentSessionId: function setCurrentSessionId() {},
+   getCurrentSessionId: function getCurrentSessionId() {
+     return '';
+-  }
++  },
++  sessionLoadKey: 0,
++  setSessionLoadKey: function setSessionLoadKey() {}
+ });
+ export function ChatAnywhereSessionsContextProvider(props) {
+   var options = useChatAnywhereOptions(function (v) {
+@@ -47,6 +49,10 @@ export function ChatAnywhereSessionsContextProvider(props) {
+     currentSessionId = _useGetState4[0],
+     setCurrentSessionId = _useGetState4[1],
+     getCurrentSessionId = _useGetState4[2];
++  var _useGetState5 = useGetState(0),
++    _useGetState6 = _slicedToArray(_useGetState5, 3),
++    sessionLoadKey = _useGetState6[0],
++    setSessionLoadKey = _useGetState6[1];
+   useMount( /*#__PURE__*/_asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee() {
+     var _sessionList$;
+     var sessionList;
+@@ -72,7 +78,9 @@ export function ChatAnywhereSessionsContextProvider(props) {
+       getSessions: getSessions,
+       currentSessionId: currentSessionId,
+       setCurrentSessionId: setCurrentSessionId,
+-      getCurrentSessionId: getCurrentSessionId
++      getCurrentSessionId: getCurrentSessionId,
++      sessionLoadKey: sessionLoadKey,
++      setSessionLoadKey: setSessionLoadKey
+     },
+     children: props.children
+   });
+@@ -85,7 +93,9 @@ export var useChatAnywhereSessions = function useChatAnywhereSessions() {
+     getSessions = _useContextSelector.getSessions,
+     getCurrentSessionId = _useContextSelector.getCurrentSessionId,
+     setCurrentSessionId = _useContextSelector.setCurrentSessionId,
+-    currentSessionId = _useContextSelector.currentSessionId;
++    currentSessionId = _useContextSelector.currentSessionId,
++    setSessionLoadKey = _useContextSelector.setSessionLoadKey,
++    sessionLoadKey = _useContextSelector.sessionLoadKey;
+   var options = useChatAnywhereOptions(function (v) {
+     return v.session;
+   });
+@@ -178,56 +188,64 @@ export var useChatAnywhereSessions = function useChatAnywhereSessions() {
+   }(), []);
+   var changeCurrentSessionId = React.useCallback(function (sessionId) {
+     setCurrentSessionId(sessionId);
+-  }, []);
++    setSessionLoadKey(function (k) {
++      return k + 1;
++    });
++  }, [setCurrentSessionId, setSessionLoadKey]);
+   useAsyncEffect( /*#__PURE__*/_asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee5() {
+-    var _yield$options$api$ge;
++    var _yield$options$api$ge, sessionIdToLoad;
+     var messages;
+     return _regeneratorRuntime().wrap(function _callee5$(_context5) {
+       while (1) switch (_context5.prev = _context5.next) {
+         case 0:
++          sessionIdToLoad = currentSessionId;
+           ReactDOM.flushSync(function () {
+             setMessages([]);
+           });
+-          _context5.next = 3;
+-          return options.api.getSession(currentSessionId);
+-        case 3:
++          _context5.next = 4;
++          return options.api.getSession(sessionIdToLoad);
++        case 4:
+           _context5.t2 = _yield$options$api$ge = _context5.sent;
+           _context5.t1 = _context5.t2 === null;
+           if (_context5.t1) {
+-            _context5.next = 7;
++            _context5.next = 8;
+             break;
+           }
+           _context5.t1 = _yield$options$api$ge === void 0;
+-        case 7:
++        case 8:
+           if (!_context5.t1) {
+-            _context5.next = 11;
++            _context5.next = 12;
+             break;
+           }
+           _context5.t3 = void 0;
+-          _context5.next = 12;
++          _context5.next = 13;
+           break;
+-        case 11:
+-          _context5.t3 = _yield$options$api$ge.messages;
+         case 12:
++          _context5.t3 = _yield$options$api$ge.messages;
++        case 13:
+           _context5.t0 = _context5.t3;
+           if (_context5.t0) {
+-            _context5.next = 15;
++            _context5.next = 16;
+             break;
+           }
+           _context5.t0 = [];
+-        case 15:
++        case 16:
+           messages = _context5.t0;
++          if (getCurrentSessionId() !== sessionIdToLoad) {
++            _context5.next = 20;
++            break;
++          }
+           setMessages(messages.map(function (item) {
+             return _objectSpread(_objectSpread({}, item), {}, {
+               history: true
+             });
+           }));
+-        case 17:
++        case 20:
+         case "end":
+           return _context5.stop();
+       }
+     }, _callee5);
+-  })), [currentSessionId]);
++  })), [currentSessionId, sessionLoadKey]);
+   return {
+     changeCurrentSessionId: changeCurrentSessionId,
+     getCurrentSessionId: getCurrentSessionId,
+diff --git a/node_modules/@agentscope-ai/chat/lib/Sender/index.js b/node_modules/@agentscope-ai/chat/lib/Sender/index.js
+index 2b05cce..15dce02 100644
+--- a/node_modules/@agentscope-ai/chat/lib/Sender/index.js
++++ b/node_modules/@agentscope-ai/chat/lib/Sender/index.js
+@@ -277,7 +277,7 @@ var ForwardSender = /*#__PURE__*/React.forwardRef(function (props, ref) {
+   var contextValue = {
+     prefixCls: actionBtnCls,
+     onSend: triggerSend,
+-    onSendDisabled: !innerValue || !innerValue.trim() || sendDisabled,
++    onSendDisabled: sendDisabled === true ? true : sendDisabled === false ? false : !innerValue || !innerValue.trim(),
+     onClear: triggerClear,
+     onClearDisabled: !innerValue,
+     onCancel: onCancel,

@@ -446,6 +446,13 @@ def _detect_chrome_executable() -> str | None:
     return None
 
 
+def _workspace_profile_dir() -> str:
+    """Return the path to the workspace-level browser profile directory."""
+    d = Path.cwd() / ".browser_profile"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)
+
+
 def _detect_chrome_user_data_dir() -> str | None:
     """Auto-detect the default Chrome user data directory."""
     if sys.platform == "win32":
@@ -1000,22 +1007,39 @@ def _attach_context_listeners(context) -> None:
 
 
 async def _ensure_browser() -> bool:
-    """Start browser if not running. Return True if ready, False on failure."""
-    if _state["browser"] is not None and _state["context"] is not None:
+    """Start browser if not running. Return True if ready, False on failure.
+
+    Uses the workspace-level profile so cookies/state persist across sessions.
+    """
+    if _state["context"] is not None:
         return True
     try:
         async_playwright = _ensure_playwright_async()
         pw = await async_playwright().start()
-        pw_browser = await pw.chromium.launch(
+        profile = _workspace_profile_dir()
+        ctx_opts = _stealth_context_options()
+        ctx_opts["args"] = _STEALTH_LAUNCH_ARGS
+        context = await pw.chromium.launch_persistent_context(
+            profile,
             headless=_state["headless"],
-            args=_STEALTH_LAUNCH_ARGS,
+            **ctx_opts,
         )
-        context = await pw_browser.new_context(**_stealth_context_options())
         await context.add_init_script(_STEALTH_INIT_JS)
         _attach_context_listeners(context)
         _state["playwright"] = pw
-        _state["browser"] = pw_browser
+        _state["browser"] = None
         _state["context"] = context
+        _state["persistent"] = True
+        for page in context.pages:
+            pid = _next_page_id()
+            _state["pages"][pid] = page
+            _state["refs"][pid] = {}
+            _state["console_logs"][pid] = []
+            _state["network_requests"][pid] = []
+            _state["pending_dialogs"][pid] = []
+            _state["pending_file_choosers"][pid] = []
+            _attach_page_listeners(page, pid)
+            _state["current_page_id"] = pid
         return True
     except Exception:
         return False
@@ -1026,6 +1050,7 @@ def _reset_state() -> None:
     _state["playwright"] = None
     _state["browser"] = None
     _state["context"] = None
+    _state["persistent"] = False
     _state["pages"].clear()
     _state["refs"].clear()
     _state["refs_frame"].clear()
@@ -1081,25 +1106,25 @@ async def _action_start(
             ),
         )
 
-    # Resolve user_data_dir="auto"
-    resolved_data_dir = ""
-    if user_data_dir:
-        if user_data_dir.strip().lower() == "auto":
-            resolved_data_dir = _detect_chrome_user_data_dir() or ""
-            if not resolved_data_dir:
-                return _tool_response(
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": "Could not auto-detect Chrome user data dir. "
-                            "Provide an explicit path.",
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                )
-        else:
-            resolved_data_dir = user_data_dir.strip()
+    # Resolve user_data_dir: default → workspace profile, "auto" → real Chrome
+    if not user_data_dir or not user_data_dir.strip():
+        resolved_data_dir = _workspace_profile_dir()
+    elif user_data_dir.strip().lower() == "auto":
+        resolved_data_dir = _detect_chrome_user_data_dir() or ""
+        if not resolved_data_dir:
+            return _tool_response(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "Could not auto-detect Chrome user data dir. "
+                        "Provide an explicit path.",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+    else:
+        resolved_data_dir = user_data_dir.strip()
 
     # Resolve channel="auto"
     resolved_channel = ""

@@ -186,6 +186,7 @@ class ChannelManager:
                         process,
                         ch_cfg,
                         on_reply_sent=on_last_dispatch,
+                        show_tool_details=show_tool_details,
                     ),
                 )
             else:

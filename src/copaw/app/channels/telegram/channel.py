@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from agentscope_runtime.engine.schemas.agent_schemas import (
     TextContent,
@@ -20,6 +20,11 @@ from ....config.config import TelegramConfig as TelegramChannelConfig
 from ..base import BaseChannel, OnReplySent, ProcessHandler
 
 logger = logging.getLogger(__name__)
+
+# Telegram Bot API limit for one message (characters).
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+# Chunk slightly under to avoid encoding/entity edge cases.
+TELEGRAM_SEND_CHUNK_SIZE = 4000
 
 
 async def _resolve_telegram_file_url(
@@ -198,7 +203,23 @@ class TelegramChannel(BaseChannel):
         self._task: Optional[asyncio.Task] = None
         self._application = None
         if self.enabled and self._bot_token:
-            self._application = self._build_application()
+            try:
+                self._application = self._build_application()
+                logger.info(
+                    "telegram: channel initialized (enabled=True, token set, polling will start on start())"
+                )
+            except Exception:
+                logger.exception(
+                    "telegram: failed to build application (check bot_token and proxy)"
+                )
+                self._application = None
+        else:
+            if self.enabled and not self._bot_token:
+                logger.info(
+                    "telegram: channel disabled for this run (bot_token empty; set in config or TELEGRAM_BOT_TOKEN)"
+                )
+            elif not self.enabled:
+                logger.debug("telegram: channel disabled (enabled=false in config)")
 
     def _build_application(self):
         from telegram import Update
@@ -272,10 +293,22 @@ class TelegramChannel(BaseChannel):
     def from_config(
         cls,
         process: ProcessHandler,
-        config: TelegramChannelConfig,
+        config: Union[TelegramChannelConfig, dict],
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
     ) -> "TelegramChannel":
+        # Support dict from API/extra (e.g. config.json raw or channel update body)
+        if isinstance(config, dict):
+            return cls(
+                process=process,
+                enabled=bool(config.get("enabled", False)),
+                bot_token=(config.get("bot_token") or "").strip(),
+                http_proxy=(config.get("http_proxy") or "").strip(),
+                http_proxy_auth=(config.get("http_proxy_auth") or "").strip(),
+                bot_prefix=(config.get("bot_prefix") or "[Bot] ").strip(),
+                on_reply_sent=on_reply_sent,
+                show_tool_details=show_tool_details,
+            )
         return cls(
             process=process,
             enabled=config.enabled,
@@ -287,13 +320,36 @@ class TelegramChannel(BaseChannel):
             show_tool_details=show_tool_details,
         )
 
+    def _chunk_text(self, text: str) -> list[str]:
+        """Split text into chunks under Telegram's message length limit."""
+        if not text or len(text) <= TELEGRAM_SEND_CHUNK_SIZE:
+            return [text] if text else []
+        chunks: list[str] = []
+        rest = text
+        while rest:
+            if len(rest) <= TELEGRAM_SEND_CHUNK_SIZE:
+                chunks.append(rest)
+                break
+            chunk = rest[:TELEGRAM_SEND_CHUNK_SIZE]
+            # Try to break at newline to avoid cutting mid-word
+            last_nl = chunk.rfind("\n")
+            if last_nl > TELEGRAM_SEND_CHUNK_SIZE // 2:
+                chunk = chunk[: last_nl + 1]
+            else:
+                last_space = chunk.rfind(" ")
+                if last_space > TELEGRAM_SEND_CHUNK_SIZE // 2:
+                    chunk = chunk[: last_space + 1]
+            chunks.append(chunk)
+            rest = rest[len(chunk) :].lstrip("\n ")
+        return chunks
+
     async def send(
         self,
         to_handle: str,
         text: str,
         meta: Optional[dict] = None,
     ) -> None:
-        """Send text to chat_id (to_handle or meta['chat_id'])."""
+        """Send text to chat_id (to_handle or meta['chat_id']). Splits long messages."""
         if not self.enabled or not self._application:
             return
         meta = meta or {}
@@ -301,41 +357,82 @@ class TelegramChannel(BaseChannel):
         if not chat_id:
             logger.warning("telegram send: no chat_id in to_handle or meta")
             return
-        try:
-            bot = self._application.bot
-            if bot:
-                await bot.send_message(chat_id=chat_id, text=text)
-        except Exception:
-            logger.exception("telegram send_message failed")
+        bot = self._application.bot
+        if not bot:
+            return
+        chunks = self._chunk_text(text)
+        for chunk in chunks:
+            try:
+                await bot.send_message(chat_id=chat_id, text=chunk)
+            except Exception:
+                logger.exception("telegram send_message failed")
+                return
 
     async def _run_polling(self) -> None:
+        """Run Telegram bot in existing event loop (FastAPI/uvicorn).
+        Do not use run_polling() - it calls run_until_complete() and fails when
+        the event loop is already running.
+        """
         if not self.enabled or not self._application or not self._bot_token:
             return
-        await self._application.run_polling(allowed_updates=["message", "edited_message"])
+        try:
+            from telegram.error import TelegramError
+
+            def _on_poll_error(exc: TelegramError) -> None:
+                self._application.create_task(
+                    self._application.process_error(error=exc, update=None),
+                )
+
+            await self._application.initialize()
+            await self._application.updater.start_polling(
+                allowed_updates=["message", "edited_message"],
+                error_callback=_on_poll_error,
+            )
+            await self._application.start()
+            logger.info("telegram: polling started (receiving updates)")
+            # Keep this coroutine alive; the updater runs in a background task.
+            await asyncio.Future()  # never completes until cancelled
+        except asyncio.CancelledError:
+            logger.debug("telegram: polling cancelled")
+            raise
+        except Exception:
+            logger.exception(
+                "telegram: polling error (check token, network, proxy; "
+                "in China you may need TELEGRAM_HTTP_PROXY)"
+            )
+            raise
 
     async def start(self) -> None:
         if not self.enabled or not self._application:
+            logger.debug(
+                "telegram: start() skipped (enabled=%s, application=%s)",
+                self.enabled,
+                "built" if self._application else "not built",
+            )
             return
         self._task = asyncio.create_task(self._run_polling(), name="telegram_polling")
+        logger.info("telegram: channel started (polling task created)")
 
     async def stop(self) -> None:
         if not self.enabled:
             return
-        if self._application:
-            try:
-                updater = getattr(self._application, "updater", None)
-                if updater and hasattr(updater, "stop"):
-                    await updater.stop()
-                if hasattr(self._application, "stop"):
-                    await self._application.stop()
-            except Exception as exc:
-                logger.debug("telegram stop: %s", exc)
         if self._task:
             self._task.cancel()
             try:
-                await asyncio.wait_for(self._task, timeout=5)
+                await asyncio.wait_for(self._task, timeout=10)
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
+            self._task = None
+        if self._application:
+            try:
+                updater = getattr(self._application, "updater", None)
+                if updater and getattr(updater, "running", False):
+                    await updater.stop()
+                if getattr(self._application, "running", False):
+                    await self._application.stop()
+                await self._application.shutdown()
+            except Exception as exc:
+                logger.debug("telegram stop: %s", exc)
 
     def resolve_session_id(
         self,

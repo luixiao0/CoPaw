@@ -1,5 +1,13 @@
 import React from "react";
-import { Form, Input, ColorPicker, Flex, Divider, InputNumber } from "antd";
+import {
+  Form,
+  Input,
+  Select,
+  ColorPicker,
+  Flex,
+  Divider,
+  InputNumber,
+} from "antd";
 import { createStyles } from "antd-style";
 import { Button, IconButton, Switch } from "@agentscope-ai/design";
 import { SparkDeleteLine, SparkPlusLine } from "@agentscope-ai/icons";
@@ -162,6 +170,20 @@ const OptionsEditor: React.FC<OptionsEditorProps> = ({ value, onChange }) => {
               </div>
             );
           }}
+        </FormItem>
+
+        <Divider orientation="left">Display</Divider>
+
+        <FormItem
+          name={["display", "verbosity"]}
+          label="Verbosity (tool call details: full vs compact)"
+        >
+          <Select
+            options={[
+              { value: "full", label: "Full (show tool details)" },
+              { value: "compact", label: "Compact (hide tool details)" },
+            ]}
+          />
         </FormItem>
 
         <Divider orientation="left">API</Divider>

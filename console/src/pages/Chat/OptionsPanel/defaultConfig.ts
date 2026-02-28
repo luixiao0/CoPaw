@@ -31,6 +31,10 @@ const defaultConfig = {
     baseURL: "",
     token: "",
   },
+  /** When "compact", tool calls and results are shown briefly (e.g. "..."); when "full", full details are shown. */
+  display: {
+    verbosity: "full" as "full" | "compact",
+  },
 } as const;
 
 export default defaultConfig;

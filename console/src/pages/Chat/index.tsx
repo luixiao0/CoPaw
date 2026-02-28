@@ -88,6 +88,8 @@ export default function ChatPage() {
       const user_id = window.currentUserId || session?.user_id || "default";
       const channel = window.currentChannel || session?.channel || "console";
 
+      const showToolDetails =
+        (optionsConfig?.display?.verbosity ?? "full") === "full";
       const requestBody = {
         input: input.slice(-1),
         session_id,
@@ -95,6 +97,10 @@ export default function ChatPage() {
         channel,
         stream: true,
         ...biz_params,
+        meta: {
+          ...(typeof biz_params?.meta === "object" ? biz_params.meta : {}),
+          show_tool_details: showToolDetails,
+        },
       };
 
       const headers: HeadersInit = {

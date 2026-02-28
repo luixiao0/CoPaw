@@ -24,6 +24,9 @@ website/.vite/
 website/tsconfig.tsbuildinfo
 website/dist/
 
+# browser
+.browser_profile/
+
 # misc
 .env
 .env.*
