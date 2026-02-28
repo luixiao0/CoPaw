@@ -12,6 +12,9 @@ export function PageHeader({ className }: PageHeaderProps) {
     <section className={`${styles.section} ${className || ""}`}>
       <h2 className={styles.sectionTitle}>{t("environments.title")}</h2>
       <p className={styles.sectionDesc}>{t("environments.description")}</p>
+      <p className={styles.sectionDesc} style={{ marginTop: 4, color: "#8c8c8c", fontSize: 13 }}>
+        {t("environments.restartHint")}
+      </p>
     </section>
   );
 }

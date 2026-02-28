@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, TYPE_CHECKING
+import os
+import platform
+import re
+from typing import Any, Dict, List, Tuple, TYPE_CHECKING
 
 from agentscope.mcp import StdIOStatefulClient
 
@@ -17,6 +20,42 @@ if TYPE_CHECKING:
     from ...config.config import MCPClientConfig, MCPConfig
 
 logger = logging.getLogger(__name__)
+
+_ENV_REF_PATTERN = re.compile(r"^\$\{([^}]+)\}$")
+
+
+def _build_mcp_env(config_env: Dict[str, str] | None) -> Dict[str, str]:
+    """Build env for MCP subprocess: inherit os.environ, apply config env.
+
+    - Resolves ${VAR} in config env from os.environ (so you can set keys only
+      in Settings → Environments and use \"TAVILY_API_KEY\": \"${TAVILY_API_KEY}\"
+      in MCP).
+    - Only non-empty resolved values override; empty does not overwrite
+      os.environ (so key from Environments is kept if MCP env has empty value).
+    """
+    out = dict(os.environ)
+    if not config_env:
+        return out
+    for k, v in config_env.items():
+        if not isinstance(v, str):
+            continue
+        v = v.strip()
+        m = _ENV_REF_PATTERN.match(v)
+        if m:
+            v = os.environ.get(m.group(1), "")
+        if v:
+            out[k] = v
+    return out
+
+
+def _adapt_command_for_windows(command: str, args: List[str]) -> Tuple[str, List[str]]:
+    """On Windows, run 'npx' via cmd /c so PATH is resolved (e.g. npx.cmd)."""
+    if platform.system() != "Windows":
+        return command, list(args)
+    cmd = command.strip().lower()
+    if cmd == "npx" or cmd.endswith(os.sep + "npx") or cmd.endswith("/npx"):
+        return "cmd", ["/c", "npx"] + list(args)
+    return command, list(args)
 
 
 class MCPClientManager:
@@ -52,9 +91,12 @@ class MCPClientManager:
                 logger.debug(f"MCP client '{key}' initialized successfully")
             except Exception as e:
                 logger.warning(
-                    f"Failed to initialize MCP client '{key}': {e}",
-                    exc_info=True,
+                    "Failed to initialize MCP client '%s': %s. "
+                    "Check that the command is installed (e.g. npx for Node-based servers) and any required env/API keys are set.",
+                    key,
+                    e,
                 )
+                logger.debug("MCP client init failure", exc_info=True)
 
     async def get_clients(self) -> List[Any]:
         """Get list of all active MCP clients.
@@ -90,11 +132,15 @@ class MCPClientManager:
         """
         # 1. Create and connect new client outside lock (may be slow)
         logger.debug(f"Connecting new MCP client: {key}")
+        env = _build_mcp_env(client_config.env)
+        cmd, args = _adapt_command_for_windows(
+            client_config.command, client_config.args
+        )
         new_client = StdIOStatefulClient(
             name=client_config.name,
-            command=client_config.command,
-            args=client_config.args,
-            env=client_config.env,
+            command=cmd,
+            args=args,
+            env=env,
         )
 
         try:
@@ -179,11 +225,15 @@ class MCPClientManager:
             client_config: Client configuration
             timeout: Connection timeout in seconds (default 60s)
         """
+        env = _build_mcp_env(client_config.env)
+        cmd, args = _adapt_command_for_windows(
+            client_config.command, client_config.args
+        )
         client = StdIOStatefulClient(
             name=client_config.name,
-            command=client_config.command,
-            args=client_config.args,
-            env=client_config.env,
+            command=cmd,
+            args=args,
+            env=env,
         )
 
         # Add timeout to prevent indefinite blocking

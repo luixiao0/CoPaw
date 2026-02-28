@@ -106,6 +106,18 @@ def _mask_env_value(value: str) -> str:
     return f"{prefix}{'*' * masked_len}{suffix}"
 
 
+def _is_masked_value(value: str) -> bool:
+    """Return True if value looks like a masked secret (e.g. from API response).
+
+    Used when merging env on update: do not overwrite existing secrets with
+    masked values that the frontend sent back (e.g. after editing in JSON modal).
+    """
+    if not value or len(value) > 512:
+        return False
+    # Our mask uses at least 4 consecutive asterisks
+    return "****" in value
+
+
 def _build_client_info(key: str, client: MCPClientConfig) -> MCPClientInfo:
     """Build MCPClientInfo from config with masked env values."""
     # Mask environment variable values for security
@@ -212,10 +224,14 @@ async def update_mcp_client(
     # Update fields if provided
     update_data = updates.model_dump(exclude_unset=True)
 
-    # Special handling for env: merge with existing, don't replace
+    # Special handling for env: merge with existing, don't replace.
+    # Skip any incoming value that looks masked (e.g. user saved JSON from API
+    # which contained masked secrets) so we don't overwrite real secrets.
     if "env" in update_data and update_data["env"] is not None:
         updated_env = existing.env.copy() if existing.env else {}
-        updated_env.update(update_data["env"])
+        for k, v in update_data["env"].items():
+            if not _is_masked_value(v):
+                updated_env[k] = v
         update_data["env"] = updated_env
 
     for field, value in update_data.items():

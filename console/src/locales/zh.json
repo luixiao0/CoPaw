@@ -186,6 +186,7 @@
   "environments": {
     "title": "环境变量",
     "description": "为智能体和技能配置键值环境变量。",
+    "restartHint": "修改后需重启应用（copaw app）后生效，例如向量搜索（EMBEDDING_*）与 MCP 客户端（如 TAVILY_API_KEY）等。",
     "key": "键",
     "value": "值",
     "variableNamePlaceholder": "VARIABLE_NAME",

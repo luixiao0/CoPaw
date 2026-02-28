@@ -114,6 +114,24 @@ export default function ChatPage() {
       });
     };
 
+    // Enable image/attachment upload in the chat input: the package only shows
+    // the upload button when sender.attachments is an object with customRequest.
+    const attachmentCustomRequest = ({
+      file,
+      onSuccess,
+    }: {
+      file: File & { uid?: string };
+      onSuccess?: (body: unknown, x?: unknown, z?: unknown) => void;
+    }) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        onSuccess?.({ url: dataUrl }, file, undefined);
+      };
+      reader.onerror = () => onSuccess?.({ url: "" }, file, undefined);
+      reader.readAsDataURL(file as Blob);
+    };
+
     return {
       ...optionsConfig,
       session: {
@@ -122,6 +140,14 @@ export default function ChatPage() {
       },
       theme: {
         ...optionsConfig.theme,
+      },
+      sender: {
+        ...optionsConfig.sender,
+        attachments: {
+          accept: "image/*",
+          maxCount: 10,
+          customRequest: attachmentCustomRequest,
+        },
       },
       api: {
         ...optionsConfig.api,

@@ -401,7 +401,15 @@ class MemoryManager(ReMeFb):
             embedding_cache_enabled,
         ) = self.get_emb_envs()
 
-        vector_enabled = bool(embedding_api_key)
+        # Enable vector search when API key is set, or when a custom base URL is
+        # set (e.g. local SGLang embedding server that does not require a key).
+        _default_embedding_base = (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        vector_enabled = bool(embedding_api_key) or bool(
+            embedding_base_url
+            and embedding_base_url.strip() != _default_embedding_base
+        )
         if vector_enabled:
             logger.info("Vector search enabled.")
         else:

@@ -186,6 +186,7 @@
   "environments": {
     "title": "Environment Variables",
     "description": "Configure key-value environment variables for agents and skills.",
+    "restartHint": "Changes take effect after restarting the app (copaw app), e.g. vector search (EMBEDDING_*) and MCP clients (e.g. TAVILY_API_KEY).",
     "key": "Key",
     "value": "Value",
     "variableNamePlaceholder": "VARIABLE_NAME",
