@@ -493,9 +493,9 @@ class MemoryManager(ReMeFb):
             "EMBEDDING_MODEL_NAME",
             "text-embedding-v4",
         )
-        embedding_dimensions = int(
-            os.environ.get("EMBEDDING_DIMENSIONS", "1024"),
-        )
+        embedding_dimensions = os.environ.get("EMBEDDING_DIMENSIONS")
+        if embedding_dimensions is not None:
+            embedding_dimensions = int(embedding_dimensions)
         embedding_cache_enabled = (
             os.environ.get("EMBEDDING_CACHE_ENABLED", "true").lower() == "true"
         )
@@ -523,7 +523,8 @@ class MemoryManager(ReMeFb):
             os.environ["REME_EMBEDDING_BASE_URL"] = embedding_base_url
 
         self.default_embedding_model.model_name = embedding_model_name
-        self.default_embedding_model.dimensions = embedding_dimensions
+        if embedding_dimensions is not None:
+            self.default_embedding_model.dimensions = embedding_dimensions
         self.default_embedding_model.enable_cache = embedding_cache_enabled
 
     async def start(self):
